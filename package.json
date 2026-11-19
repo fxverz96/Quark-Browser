@@ -1,0 +1,88 @@
+{
+  "name": "quark-browser",
+  "productName": "Quark",
+  "version": "1.0.1",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "npm run stamp && npm run bundle && electron-builder --win nsis --x64 --publish never",
+    "bundle": "esbuild preload-ui.src.js --bundle --platform=node --external:electron --outfile=preload-ui.js",
+    "stamp": "node -e \"require('fs').writeFileSync('build-info.json', JSON.stringify({builtAt: new Date().toISOString()}))\"",
+    "release": "npm run stamp && npm run bundle && electron-builder --win nsis --x64 --publish always"
+  },
+  "devDependencies": {
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2"
+  },
+  "build": {
+    "appId": "com.streamhub.browser",
+    "productName": "Quark",
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "preload-ui.js",
+      "*.html",
+      "icons/*.svg",
+      "icon.ico",
+      "icon.png",
+      "build-info.json",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.ico",
+      "signAndEditExecutable": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Quark",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Quark-Setup.exe",
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": false,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": true
+    },
+    "publish": {
+      "provider": "github",
+      "releaseType": "release"
+    }
+  },
+  "dependencies": {
+    "@ghostery/adblocker-electron": "^2.20.3",
+    "electron-chrome-extensions": "^4.10.0",
+    "electron-chrome-web-store": "^0.13.0",
+    "electron-updater": "^6.8.11"
+  },
+  "description": "Quark - a fast, private desktop browser",
+  "author": "Quark"
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Profiles</title>
+<style>
+:root{--bg:#252b3a;--line:#3a4358;--txt:#e8ebf2;--dim:#9aa3b8;--hov:#323b52}
+@media (prefers-color-scheme:light){:root{--bg:#ffffff;--line:#dfe4ee;--txt:#1d2330;--dim:#5d6678;--hov:#eef1f7}}
+*{box-sizing:border-box;margin:0}
+html{background:var(--bg)}
+body{color:var(--txt);font:13px "Segoe UI",system-ui,sans-serif;padding:14px 12px;user-select:none}
+.big{display:flex;align-items:center;gap:12px;padding:4px 6px 10px}
+.av{position:relative;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:14px;font-weight:600;color:#fff;overflow:hidden;flex:none}
+.av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.lg{width:48px;height:48px;font-size:20px}
+.name{font-size:16px;font-weight:600}
+small{display:block;color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row,.act{display:flex;align-items:center;gap:12px;padding:8px 8px;border-radius:10px;cursor:pointer}
+.row:hover,.act:hover{background:var(--hov)}
+.row>div:last-child{min-width:0;flex:1}
+.act b{width:32px;text-align:center;font-weight:400;font-size:16px;color:var(--dim)}
+hr{border:0;border-top:1px solid var(--line);margin:8px 0}
+h3{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:6px 8px 4px;font-weight:600}
+.note{color:var(--dim);padding:4px 8px 8px;line-height:1.5}
+</style></head>
+<body><div id="app"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const ini = s => (s || '?').trim()[0].toUpperCase();
+const av = (color, letter, photo, cls = '') => `<div class="av ${cls}" style="background:${esc(color)}"><span>${esc(letter)}</span>${photo ? `<img src="${esc(photo)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
+function render(d) {
+  const cur = d.profiles.find(p => p.id === d.current) || d.profiles[0];
+  const others = d.profiles.filter(p => p !== cur);
+  let h = `<div class="big">${av(cur.color, ini(cur.name), '', 'lg')}<div><div class="name">${esc(cur.name)}</div><small>This profile</small></div></div><h3>Google accounts</h3>`;
+  h += cur.accounts.length
+    ? cur.accounts.map(a => `<div class="row" data-k="acct">${av('#4285f4', ini(a.name || a.email), a.photo)}<div>${esc(a.name || a.email)}${a.name ? `<small>${esc(a.email)}</small>` : ''}</div></div>`).join('')
+    : `<p class="note">${cur.signedIn ? 'Signed in to Google. Open Gmail once and the address will show here.' : 'No Google account signed in yet.'}</p>`;
+  h += `<div class="act" data-k="add"><b>+</b>Add Gmail account</div>`;
+  if (others.length) h += `<hr><h3>Other profiles</h3>` + others.map(p => `<div class="row" data-k="tab" data-id="${esc(p.id)}">${av(p.color, ini(p.name), '')}<div>${esc(p.name)}<small>${esc(p.accounts.map(a => a.email).join(', ') || 'No Google account')}</small></div></div>`).join('');
+  h += `<hr><div class="act" data-k="new"><b>+</b>New profile</div><div class="act" data-k="gmail"><b>✉</b>Open Gmail</div><div class="act" data-k="acct"><b>G</b>Google Account</div><div class="act" data-k="manage"><b>⚙</b>Manage profiles</div>`;
+  $('app').innerHTML = h;
+  hub.cmd('pcardSize', document.documentElement.scrollHeight);
+}
+(async () => { render(await hub.data('pcard')); render(await hub.data('pcardRefresh')); })();
+document.addEventListener('click', e => { const el = e.target.closest('[data-k]'); if (el) hub.cmd('pm', { k: el.dataset.k, id: el.dataset.id }); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hub.cmd('pm', { k: 'close' }); });
+</script></body></html>

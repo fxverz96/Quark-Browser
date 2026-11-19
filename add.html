@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https: crx:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Add to sidebar</title>
+<style>
+:root{--bg:#232a3b;--in:#181d2a;--line:#434d68;--txt:#e8ebf2;--hov:#323b52}
+@media (prefers-color-scheme:light){:root{--bg:#f5f7fb;--in:#ffffff;--line:#cdd4e2;--txt:#1d2330;--hov:#e1e6f0}}
+*{box-sizing:border-box;margin:0}
+body{padding:24px;background:var(--bg);color:var(--txt);font:14px "Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;gap:14px}
+h1{font-size:16px;font-weight:600}
+input{height:42px;padding:0 16px;border-radius:21px;border:1px solid var(--line);background:var(--in);color:var(--txt);font:inherit;outline:0}
+input:focus{border-color:#2dd4bf}
+div{display:flex;justify-content:flex-end;gap:8px}
+button{height:34px;padding:0 18px;border:0;border-radius:17px;background:var(--hov);color:var(--txt);font:inherit;cursor:pointer}
+button.go{background:#2dd4bf;color:#06201c;font-weight:600}
+</style></head><body>
+<h1 id="h"></h1>
+<input id="u" placeholder="e.g. web.whatsapp.com or https://..." autofocus autocomplete="off" spellcheck="false">
+<div><button id="c">Cancel</button><button class="go" id="a">Add</button></div>
+<script>
+const mode = location.hash.slice(1), send = { shortcut: 'scAdd', profile: 'pfAdd' }[mode] || 'sbAdd';
+h.textContent = { shortcut: 'Add a shortcut to the home page', profile: 'Create a new profile' }[mode] || 'Add a website to the sidebar';
+document.title = { shortcut: 'Add shortcut', profile: 'New profile' }[mode] || 'Add to sidebar';
+if (mode === 'profile') { u.placeholder = 'Profile name, e.g. Work Gmail'; a.textContent = 'Create'; }
+const add = () => hub.cmd(send, u.value);
+a.onclick = add;
+c.onclick = () => hub.cmd(send, '');
+u.addEventListener('keydown', e => { if (e.key === 'Enter') add(); if (e.key === 'Escape') hub.cmd(send, ''); });
+</script></body></html>

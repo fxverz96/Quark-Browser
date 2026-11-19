@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https: crx:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Close Quark</title>
+<style>
+:root{--bg:#232a3b;--line:#434d68;--txt:#e8ebf2;--dim:#9aa3b8;--hov:#323b52;--acc:#2dd4bf}
+@media (prefers-color-scheme:light){:root{--bg:#f5f7fb;--line:#cdd4e2;--txt:#1d2330;--dim:#5d6678;--hov:#e1e6f0;--acc:#0d9488}}
+*{box-sizing:border-box;margin:0}
+body{padding:26px 28px;background:var(--bg);color:var(--txt);font:14px "Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;gap:12px;height:100vh}
+h1{font-size:18px;font-weight:600}
+p{color:var(--dim);font-size:13px}
+label{display:flex;flex-direction:column;gap:2px;padding:10px 14px 10px 40px;border:1px solid var(--line);border-radius:12px;position:relative;cursor:pointer}
+label input{position:absolute;left:14px;top:13px;width:16px;height:16px;accent-color:var(--acc)}
+label small{color:var(--dim);font-size:12px}
+.rem{border-style:dashed}
+.row{display:flex;justify-content:flex-end;gap:10px;margin-top:auto}
+button{height:36px;padding:0 20px;border:0;border-radius:18px;background:var(--hov);color:var(--txt);font:inherit;cursor:pointer}
+button.go{background:var(--acc);color:#06201c;font-weight:600}
+</style></head>
+<body>
+<h1>Before you close Quark</h1>
+<p>Delete these when closing (for all profiles):</p>
+<label><input type="checkbox" id="cookies">Cookies and site data<small>You will be signed out of Gmail and other sites</small></label>
+<label><input type="checkbox" id="history">Browsing history</label>
+<label><input type="checkbox" id="cache">Cached images and files</label>
+<label class="rem"><input type="checkbox" id="remember">Always do this, don't ask again<small>You can turn asking back on in Settings</small></label>
+<div class="row"><button id="c">Cancel</button><button class="go" id="ok">Close Quark</button></div>
+<script>
+const $ = id => document.getElementById(id);
+(async () => { const d = await hub.data('getExit'); for (const k of ['cookies', 'history', 'cache']) $(k).checked = !!d[k]; })();
+$('ok').onclick = () => hub.cmd('exitDo', { cookies: $('cookies').checked, history: $('history').checked, cache: $('cache').checked, remember: $('remember').checked });
+$('c').onclick = () => hub.cmd('exitCancel');
+</script></body></html>

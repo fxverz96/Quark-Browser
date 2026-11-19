@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https: crx:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Warning</title>
+<style>
+:root{--bg:#232a3b;--card:#2b3347;--txt:#e8ebf2;--dim:#9aa3b8;--bad:#f87171}
+@media (prefers-color-scheme:light){:root{--bg:#f5f7fb;--card:#ffffff;--txt:#1d2330;--dim:#5d6678;--bad:#dc2626}}
+*{box-sizing:border-box;margin:0}
+body{min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--txt);font:14px "Segoe UI",system-ui,sans-serif}
+.card{width:min(560px,90vw);background:var(--card);border-radius:20px;padding:36px}
+.ic{font-size:38px;margin-bottom:10px}
+h1{font-size:24px;margin-bottom:12px;color:var(--bad)}
+p{color:var(--dim);line-height:1.6}
+code{display:block;word-break:break-all;margin:14px 0 6px;font-size:13px}
+small{color:var(--dim);font-size:12px}
+.row{display:flex;gap:14px;align-items:center;margin-top:26px}
+button{height:40px;padding:0 22px;border:0;border-radius:20px;font:inherit;cursor:pointer}
+.safe{background:#2dd4bf;color:#06201c;font-weight:600}
+.risk{background:none;color:var(--dim);text-decoration:underline;padding:0}
+</style></head>
+<body>
+<div class="card">
+  <div class="ic">⚠️</div><h1 id="t"></h1><p id="m"></p><code id="u"></code><small id="e"></small>
+  <div class="row"><button class="safe" id="b">Back to safety</button><button class="risk" id="c"></button></div>
+</div>
+<script>
+const d = JSON.parse(decodeURIComponent(location.hash.slice(1)) || '{}');
+let host = ''; try { host = new URL(d.url).hostname; } catch {}
+const T = {
+  cert: ["Your connection isn't private", `Quark can't verify the security certificate of ${host}. Attackers might be trying to steal your information (passwords, messages or card numbers).`, 'Continue anyway (unsafe)'],
+  http: ["This site isn't secure", `${host} doesn't support a secure (HTTPS) connection. Anything you type here, like passwords or card numbers, can be seen by other people on the network.`, 'Continue anyway (HTTP)'],
+  phishing: ['Deceptive site ahead', `${host} may be pretending to be another website to steal your passwords or card numbers.`, 'Continue anyway (unsafe)'],
+  malware: ['Dangerous site ahead', `${host} is on a list of websites that spread malware or steal information.`, 'Continue anyway (unsafe)']
+}[d.type] || ['Warning', 'This page may not be safe.', 'Continue anyway'];
+t.textContent = T[0]; m.textContent = T[1]; c.textContent = T[2]; u.textContent = d.url || ''; e.textContent = d.err || '';
+b.onclick = () => hub.cmd('home');
+c.onclick = () => hub.cmd('proceed', { type: d.type, url: d.url });
+</script></body></html>

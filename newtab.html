@@ -1,0 +1,53 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https: crx:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>New Tab</title>
+<style>
+:root{--bg:#232a3b;--in:#2c3449;--line:#434d68;--txt:#e8ebf2;--dim:#8b93a7}
+@media (prefers-color-scheme:light){:root{--bg:#f5f7fb;--in:#ffffff;--line:#cdd4e2;--txt:#1d2330;--dim:#6b7389}}
+*{box-sizing:border-box;margin:0}
+body{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:30px;background:var(--bg);color:var(--txt);font:14px "Segoe UI",system-ui,sans-serif}
+h1{font-size:46px;background:linear-gradient(90deg,#2dd4bf,#38bdf8);-webkit-background-clip:text;color:transparent}
+input{width:min(640px,86vw);height:54px;padding:0 24px;border-radius:27px;border:1px solid var(--line);background:var(--in);color:var(--txt);font-size:16px;outline:0}
+input::placeholder{color:var(--dim)}
+input:focus{border-color:#2dd4bf}
+nav{display:flex;gap:26px;flex-wrap:wrap;justify-content:center;max-width:min(760px,90vw)}
+nav a{display:flex;flex-direction:column;align-items:center;gap:8px;width:76px;color:var(--txt);text-decoration:none;font-size:12px}
+nav span{max-width:76px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.t{width:54px;height:54px;border-radius:15px;overflow:hidden;display:grid;place-items:center;font-size:22px;font-weight:600;color:#fff;background:#fff;transition:transform .15s}
+.t img{width:100%;height:100%;object-fit:cover}
+nav a:hover .t{transform:scale(1.08)}
+.plus{background:none;border:1.5px dashed var(--line);color:var(--dim);font-size:28px;font-weight:300}
+</style></head>
+<body>
+<h1>Quark</h1>
+<input id="q" placeholder="Search or paste link" autofocus autocomplete="off" spellcheck="false">
+<nav id="nav"></nav>
+<script>
+q.addEventListener('keydown', e => {
+  const s = q.value.trim();
+  if (e.key !== 'Enter' || !s) return;
+  location.href = /^https?:\/\//i.test(s) ? s
+    : /^[\w-]+(\.[\w-]+)+(:\d+)?(\/\S*)?$/.test(s) ? 'https://' + s
+    : 'https://www.google.com/search?q=' + encodeURIComponent(s);
+});
+const mk = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt) e.textContent = txt; return e; };
+async function render() {
+  const list = await hub.data('shortcuts');
+  nav.replaceChildren();
+  list.forEach((s, i) => {
+    const a = mk('a'); a.href = s.url; a.dataset.i = i;
+    const t = mk('div', 't');
+    if (s.icon) { const im = mk('img'); im.src = 'icons/' + s.icon; t.append(im); }
+    else {
+      t.style.background = s.color; t.textContent = s.name[0].toUpperCase();
+      const im = mk('img'); im.src = new URL(s.url).origin + '/favicon.ico';
+      im.onload = () => { t.style.background = '#fff'; t.textContent = ''; t.append(im); };
+    }
+    a.append(t, mk('span', '', s.name)); nav.append(a);
+  });
+  const add = mk('a'); add.href = '#'; add.id = 'add';
+  add.append(mk('div', 't plus', '+'), mk('span', '', 'Add')); nav.append(add);
+}
+nav.addEventListener('click', e => { if (e.target.closest('#add')) { e.preventDefault(); hub.cmd('scNew'); } });
+nav.addEventListener('contextmenu', e => { const a = e.target.closest('a[data-i]'); if (a) { e.preventDefault(); hub.cmd('scMenu', +a.dataset.i); } });
+render();
+</script></body></html>
