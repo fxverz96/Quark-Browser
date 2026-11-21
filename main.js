@@ -338,6 +338,15 @@ async function setupAdblock() {
   const cache = { path: path.join(app.getPath('userData'), 'adblock.bin'),
     read: fs.promises.readFile, write: fs.promises.writeFile };
   blocker = await ElectronBlocker.fromPrebuiltFull(fetch, cache);
+  // YouTube's player breaks easily when ad scripts are injected, so by default the blocker skips YouTube (Settings can turn it on)
+  const YT_HOST = /(^|\.)(youtube\.com|youtu\.be|googlevideo\.com|ytimg\.com|ggpht\.com|youtube-nocookie\.com)$/;
+  const host = u => { try { return new URL(u).hostname; } catch { return ''; } };
+  const ytSkip = u => !settings.get().ytAds && YT_HOST.test(host(u || ''));
+  const pageUrl = d => { try { return d.webContents?.getURL() || ''; } catch { return ''; } };
+  const cos = blocker.onInjectCosmeticFilters.bind(blocker);
+  blocker.onInjectCosmeticFilters = (e, url, msg) => ytSkip(url) ? undefined : cos(e, url, msg);
+  const bef = blocker.onBeforeRequest.bind(blocker);
+  blocker.onBeforeRequest = (d, cb) => (ytSkip(d.url) || ytSkip(d.referrer) || ytSkip(pageUrl(d))) ? cb({}) : bef(d, cb);
   blocker.on('request-blocked', () => { blocked++; clearTimeout(pt); pt = setTimeout(push, 500); });
   if (adblock) for (const id of ready) blockIn(sesOf(id));
 }
@@ -654,6 +663,222 @@ function showProfileCard({ x, y }) {
   pcard.loadFile('profile.html');
 }
 
+/* ---------- YouTube downloader (helper tools are fetched on first use, not bundled) ---------- */
+const { spawn, execFile } = require('child_process');
+const crypto = require('crypto');
+const EXE = process.platform === 'win32' ? '.exe' : '';
+const testMode = () => !app.isPackaged;
+const toolsDir = () => (testMode() && process.env.SH_TOOLSDIR) || path.join(app.getPath('userData'), 'components');
+const toolPath = n => (testMode() && process.env['SH_' + n.toUpperCase()]) || path.join(toolsDir(), n + EXE);
+const TOOL_INFO = { ytdlp: { name: 'yt-dlp (video fetcher)', mb: 24 }, deno: { name: 'Deno (runs YouTube\'s scripts)', mb: 43 }, ffmpeg: { name: 'FFmpeg (joins video + audio, makes MP3)', mb: 115 } };
+const toolsMissing = () => Object.keys(TOOL_INFO).filter(n => !fs.existsSync(toolPath(n)));
+const procEnv = () => ({ ...process.env, PATH: toolsDir() + path.delimiter + (process.env.PATH || ''), PYTHONIOENCODING: 'utf-8' });
+const ffLoc = () => (testMode() && process.env.SH_FFMPEG) || toolsDir();
+
+async function downloadTo(url, dest, onProgress) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(1800000) });
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const total = +r.headers.get('content-length') || 0;
+  let got = 0, last = 0;
+  const out = fs.createWriteStream(dest), reader = r.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!out.write(value)) await new Promise(res => out.once('drain', res));
+    got += value.length;
+    if (Date.now() - last > 300) { last = Date.now(); onProgress?.(got, total); }
+  }
+  await new Promise((res, rej) => out.end(err => err ? rej(err) : res()));
+  onProgress?.(got, total || got);
+}
+const sha256 = f => new Promise((res, rej) => { const h = crypto.createHash('sha256'); fs.createReadStream(f).on('data', d => h.update(d)).on('end', () => res(h.digest('hex'))).on('error', rej); });
+const getText = async u => { const r = await fetch(u, { signal: AbortSignal.timeout(30000) }); if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); };
+const unzip = (zip, dest) => new Promise((res, rej) => execFile(process.platform === 'win32' ? 'tar' : 'unzip',
+  process.platform === 'win32' ? ['-xf', zip, '-C', dest] : ['-o', '-q', zip, '-d', dest], { windowsHide: true, maxBuffer: 1 << 24 }, err => err ? rej(err) : res()));
+function findFile(dir, name) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) { const r = findFile(p, name); if (r) return r; } else if (e.name.toLowerCase() === name) return p;
+  }
+  return null;
+}
+
+async function findFfmpegAsset() {
+  try { // the release page lists every file with its SHA-256, so no rate-limited API is needed
+    const r = await fetch('https://github.com/GyanD/codexffmpeg/releases/latest', { signal: AbortSignal.timeout(30000) });
+    const tag = r.url.split('/tag/')[1];
+    const html = await getText('https://github.com/GyanD/codexffmpeg/releases/expanded_assets/' + tag);
+    for (const block of html.split(/<li\b/)) {
+      const m = block.match(/href="([^"]*essentials_build\.zip)"/), d = block.match(/sha256:([a-f0-9]{64})/);
+      if (m && d) return { url: 'https://github.com' + m[1], sha: d[1] };
+    }
+  } catch {}
+  const rel = JSON.parse(await getText('https://api.github.com/repos/GyanD/codexffmpeg/releases/latest'));
+  const a = (rel.assets || []).find(x => /essentials_build\.zip$/.test(x.name));
+  if (!a) throw new Error('Could not find the FFmpeg download');
+  return { url: a.browser_download_url, sha: (a.digest || '').replace('sha256:', '') };
+}
+
+// Every file is checked against the publisher's SHA-256 before it is kept
+async function installTool(name, report, plat = process.platform) {
+  const dir = toolsDir(), ext = plat === 'win32' ? '.exe' : '', tmp = path.join(dir, name + '.part');
+  fs.mkdirSync(dir, { recursive: true });
+  const verify = async want => { if (!want || (await sha256(tmp)) !== want.toLowerCase()) { fs.rmSync(tmp, { force: true }); throw new Error(`${name} failed the safety check, so it was not installed`); } };
+  if (name === 'ytdlp') {
+    const asset = plat === 'win32' ? 'yt-dlp.exe' : 'yt-dlp_linux', base = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/';
+    const want = (await getText(base + 'SHA2-256SUMS')).split('\n').map(l => l.trim().split(/\s+/)).find(p => (p[1] || '').replace('*', '') === asset)?.[0];
+    await downloadTo(base + asset, tmp, report); await verify(want);
+    fs.renameSync(tmp, path.join(dir, 'yt-dlp' + ext)); if (plat !== 'win32') fs.chmodSync(path.join(dir, 'yt-dlp'), 0o755);
+    return;
+  }
+  const work = path.join(dir, 'unpack-' + name);
+  fs.rmSync(work, { recursive: true, force: true }); fs.mkdirSync(work, { recursive: true });
+  if (name === 'deno') {
+    const f = 'deno-x86_64-pc-windows-msvc.zip', base = 'https://github.com/denoland/deno/releases/latest/download/';
+    const want = ((await getText(base + f + '.sha256sum')).match(/[A-Fa-f0-9]{64}/) || [])[0];
+    await downloadTo(base + f, tmp, report); await verify(want);
+    await unzip(tmp, work);
+    fs.copyFileSync(findFile(work, 'deno.exe'), path.join(dir, 'deno' + ext));
+  } else if (name === 'ffmpeg') {
+    const a = await findFfmpegAsset();
+    await downloadTo(a.url, tmp, report); await verify(a.sha);
+    await unzip(tmp, work);
+    for (const n of ['ffmpeg.exe', 'ffprobe.exe']) { const p = findFile(work, n); if (p) fs.copyFileSync(p, path.join(dir, n)); }
+  }
+  fs.rmSync(tmp, { force: true }); fs.rmSync(work, { recursive: true, force: true });
+}
+
+function runYt(args, { timeout = 120000, onLine, onProc } = {}) {
+  return new Promise(res => {
+    const p = spawn(toolPath('ytdlp'), args, { env: procEnv(), windowsHide: true });
+    onProc?.(p);
+    let out = '', err = '', buf = '';
+    const timer = setTimeout(() => p.kill(), timeout);
+    p.stdout.on('data', d => {
+      if (!onLine) { out += d; return; }
+      buf += d; let i;
+      while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i).trim()); buf = buf.slice(i + 1); }
+    });
+    p.stderr.on('data', d => { err += d; });
+    p.on('error', e => { clearTimeout(timer); res({ code: -1, out, err: String(e) }); });
+    p.on('close', code => { clearTimeout(timer); res({ code, out, err }); });
+  });
+}
+const friendlyErr = e => ((String(e).split('\n').filter(l => /ERROR/.test(l)).pop() || String(e).slice(-200)).replace(/^ERROR:\s*(\[[^\]]+\]\s*)?/, '').trim() || 'Something went wrong');
+
+function canonYt(u) {
+  try {
+    const x = new URL(u), h = x.hostname.replace(/^(www|m)\./, '');
+    let id = '';
+    if (h === 'youtube.com') id = x.pathname === '/watch' ? x.searchParams.get('v') : (x.pathname.match(/^\/shorts\/([\w-]{11})/) || [])[1];
+    else if (h === 'youtu.be') id = x.pathname.slice(1, 12);
+    return /^[\w-]{11}$/.test(id || '') ? 'https://www.youtube.com/watch?v=' + id : null;
+  } catch { return null; }
+}
+
+function buildOptions(info) {
+  const fm = info.formats || [];
+  const hasV = f => f.vcodec && f.vcodec !== 'none', hasA = f => f.acodec && f.acodec !== 'none';
+  const size = f => (f && (f.filesize || f.filesize_approx)) || 0;
+  const top = (list, key) => list.slice().sort((a, b) => (b[key] || b.tbr || 0) - (a[key] || a.tbr || 0))[0];
+  const audios = fm.filter(f => hasA(f) && !hasV(f));
+  const byLang = new Map();
+  for (const f of audios) { const k = f.language || 'und'; if (!byLang.has(k)) byLang.set(k, []); byLang.get(k).push(f); }
+  let dn = null; try { dn = new Intl.DisplayNames(['en'], { type: 'language' }); } catch {}
+  const langs = [...byLang.entries()].map(([code, list]) => {
+    const note = list.map(f => f.format_note || '').join(' ');
+    const orig = /original/i.test(note), dub = /dub/i.test(note);
+    let name = 'Default'; if (code !== 'und') { try { name = dn?.of(code) || code; } catch { name = code; } }
+    return { code, label: name + (orig ? ' (original)' : dub ? ' (auto-dubbed)' : ''), pref: orig ? 2 : /default/i.test(note) ? 1 : 0, size: size(top(list, 'abr')) };
+  }).sort((a, b) => b.pref - a.pref);
+  const bestAudioSize = langs[0]?.size || 0;
+  const vids = fm.filter(f => hasV(f) && f.height);
+  const video = [...new Set(vids.map(f => f.height))].sort((a, b) => b - a).map(h => {
+    const v = top(vids.filter(f => f.height === h), 'tbr');
+    return { height: h, label: h + 'p' + (v.fps > 30 ? Math.round(v.fps) : ''), size: size(v) ? size(v) + (hasA(v) ? 0 : bestAudioSize) : 0 };
+  });
+  return { id: info.id, title: info.title || '', uploader: info.uploader || info.channel || '', duration: info.duration || 0, thumb: /^https:/.test(info.thumbnail || '') ? info.thumbnail : '', video, langs };
+}
+
+const ytJobs = new Map();
+let ytWin = null;
+const sendYt = m => { if (ytWin && !ytWin.isDestroyed()) ytWin.webContents.send('msg', m); };
+
+function openYtPanel(url) {
+  const cb = win.getContentBounds(), W = 430, H = 580;
+  const hash = encodeURIComponent(url);
+  if (ytWin && !ytWin.isDestroyed()) { ytWin.loadFile('ytdl.html', { hash }); ytWin.show(); ytWin.focus(); return; }
+  ytWin = new BrowserWindow({ parent: win, x: Math.max(cb.x, cb.x + cb.width - W - 18), y: cb.y + 100, width: W, height: H, frame: false, resizable: false,
+    minimizable: false, maximizable: false, skipTaskbar: true, show: false, title: 'Download',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#252b3a' : '#ffffff',
+    webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  ytWin.setMenu(null);
+  ytWin.once('ready-to-show', () => ytWin && ytWin.show());
+  ytWin.on('closed', () => { ytWin = null; });
+  ytWin.loadFile('ytdl.html', { hash });
+}
+
+ipcMain.on('ytdl:open', e => { // sent by the floating Download button, only from a YouTube video page's top frame
+  const f = e.senderFrame;
+  if (!f || f !== e.sender.mainFrame || !/^https:\/\/(www\.|m\.)?youtube\.com\//.test(f.url)) return;
+  const u = canonYt(f.url);
+  if (u) openYtPanel(u);
+});
+
+async function ytInfo(url) {
+  const u = (testMode() && process.env.SH_YT_OVERRIDE) || canonYt(url);
+  if (!u) return { error: 'This is not a YouTube video page.' };
+  if (toolsMissing().length) return { error: 'tools' };
+  if (!testMode()) { // keep yt-dlp fresh: YouTube changes often
+    const f = toolPath('ytdlp');
+    if (Date.now() - fs.statSync(f).mtimeMs > 2 * 864e5) { await ytUpdate(); const n = new Date(); fs.utimesSync(f, n, n); }
+  }
+  const r = await runYt(['-J', '--no-playlist', '--no-warnings', '--no-colors', '--', u]);
+  if (r.code !== 0 || !r.out) return { error: friendlyErr(r.err) };
+  try { return buildOptions(JSON.parse(r.out)); } catch { return { error: 'Could not read the video details.' }; }
+}
+const ytUpdate = () => new Promise(res => execFile(toolPath('ytdlp'), ['-U', '--no-colors'], { env: procEnv(), windowsHide: true, timeout: 90000 },
+  (err, out) => res({ message: String(out || '').trim().split('\n').pop() || (err ? 'Update failed' : 'Done') })));
+
+function ytStart(o) {
+  const url = (testMode() && process.env.SH_YT_OVERRIDE) || canonYt(o.url);
+  const mode = ['video', 'mp3', 'm4a'].includes(o.mode) ? o.mode : null, height = Math.round(+o.height) || 0;
+  const lang = /^[A-Za-z0-9-]{2,12}$/.test(o.lang || '') && o.lang !== 'und' ? o.lang : '';
+  if (!url || !mode || (mode === 'video' && !(height > 0 && height < 10000))) return { error: 'Invalid choice' };
+  const ba = lang ? `ba[language=${lang}]` : 'ba';
+  const tag = lang && o.tagLang ? ` [${lang}]` : '';
+  const out = path.join(app.getPath('downloads'), `%(title).120B [%(id)s]${tag}.%(ext)s`);
+  const args = ['--no-playlist', '--no-warnings', '--no-mtime', '--windows-filenames', '--no-colors', '--newline', '--progress',
+    '--progress-template', 'download:Q|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
+    '--print', 'after_move:FILE|%(filepath)s', '--ffmpeg-location', ffLoc(), '-o', out];
+  if (mode === 'video') args.push('-f', `bv*[height<=${height}]+${ba}/bv*[height<=${height}]+ba/b[height<=${height}]/b`, '-S', 'res,vcodec:h264,acodec:aac', '--merge-output-format', 'mp4');
+  else if (mode === 'mp3') args.push('-f', `${ba}/ba/b`, '-x', '--audio-format', 'mp3', '--audio-quality', '0');
+  else args.push('-f', `${ba}[ext=m4a]/${ba}/ba[ext=m4a]/ba/b`, '-x', '--audio-format', 'm4a');
+  args.push('--', url);
+  const id = 'j' + Date.now(), job = { id, proc: null, file: '', cancelled: false };
+  ytJobs.set(id, job);
+  sendYt({ type: 'job', id, state: 'starting' });
+  runYt(args, {
+    timeout: 6 * 3600 * 1000,
+    onProc: p => { job.proc = p; },
+    onLine: l => {
+      if (l.startsWith('Q|')) { const [, pct, speed, eta] = l.split('|'); sendYt({ type: 'job', id, state: 'downloading', pct: parseFloat(pct) || 0, speed: (speed || '').trim(), eta: (eta || '').trim() }); }
+      else if (l.startsWith('FILE|')) job.file = l.slice(5);
+    }
+  }).then(r => {
+    ytJobs.delete(id);
+    if (job.cancelled) return sendYt({ type: 'job', id, state: 'cancelled' });
+    if (r.code === 0 && job.file) sendYt({ type: 'job', id, state: 'done', file: job.file });
+    else sendYt({ type: 'job', id, state: 'error', error: friendlyErr(r.err) });
+  });
+  return { id };
+}
+function ytCancel(id) {
+  const j = ytJobs.get(id); if (!j?.proc) return;
+  j.cancelled = true;
+  if (process.platform === 'win32') execFile('taskkill', ['/pid', String(j.proc.pid), '/T', '/F'], { windowsHide: true }, () => {}); else j.proc.kill('SIGTERM');
+}
+
 /* ---------- Sidebar ---------- */
 function showPanel(id) {
   if (openPanel && panels[openPanel]) win.contentView.removeChildView(panels[openPanel]);
@@ -844,6 +1069,8 @@ ipcMain.on('cmd', (e, c, a) => {
     case 'google': addGmailFlow(tab()); break;
     case 'pfNew': addDialog('profile'); break;
     case 'checkUpdates': checkUpdates(true); break;
+    case 'ytShow': if (typeof a === 'string' && path.resolve(a).startsWith(path.resolve(app.getPath('downloads')))) shell.showItemInFolder(a); break;
+    case 'ytClose': if (ytWin && !ytWin.isDestroyed() && e.sender === ytWin.webContents) ytWin.close(); break;
     case 'pfAdd': { const gm = pendingGmail, p = addProfile(a); BrowserWindow.fromWebContents(e.sender)?.close(); if (p) newTab(gm ? GOOGLE_LOGIN : NEWTAB, { profile: p.id }); break; }
     case 'exitDo': {
       const st = settings.get(), o = { cookies: !!a?.cookies, history: !!a?.history, cache: !!a?.cache };
@@ -883,6 +1110,14 @@ ipcMain.handle('data', (e, what, a) => {
     case 'about': return { version: app.getVersion(), built: new Date(BUILT).toDateString(), age: ageDays(), chromium: process.versions.chrome, electron: process.versions.electron };
     case 'getTheme': return theme();
     case 'shortcuts': return shortcuts();
+    case 'ytTools': return { ready: toolsMissing().length === 0, missing: toolsMissing().map(k => TOOL_INFO[k]) };
+    case 'ytInstall': return (async () => { try { for (const n of toolsMissing()) await installTool(n, (got, total) => sendYt({ type: 'install', tool: TOOL_INFO[n].name, got, total })); return {}; } catch (err) { return { error: String(err.message || err) }; } })();
+    case 'ytInfo': return ytInfo(a);
+    case 'ytStart': return ytStart(a || {});
+    case 'ytCancel': ytCancel(a); break;
+    case 'ytUpdate': return ytUpdate();
+    case 'getYt': return !!settings.get().ytAds;
+    case 'setYt': settings.get().ytAds = !!a; settings.save(); break;
     case 'getDark': return settings.get().darkSites !== false;
     case 'setDark': settings.get().darkSites = !!a; settings.save(); break;
     case 'extList': return extList();

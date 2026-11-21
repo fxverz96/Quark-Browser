@@ -5,7 +5,8 @@ if (location.protocol === 'file:') {
     cmd: (c, a) => ipc.send('cmd', c, a),
     data: (w, a) => ipc.invoke('data', w, a),
     onState: fn => ipc.on('state', (_, s) => fn(s)),
-    onFocusUrl: fn => ipc.on('focus-url', () => fn())
+    onFocusUrl: fn => ipc.on('focus-url', () => fn()),
+    onMsg: fn => ipc.on('msg', (_, m) => fn(m))
   });
 }
 
@@ -21,4 +22,21 @@ if (/^accounts\.(google|youtube)\.com$/.test(location.hostname)) {
     },
     args: [ua, '5.0 (' + (win ? 'Windows' : mac ? 'Macintosh' : 'X11') + ')']
   });
+}
+
+// Floating "Download" button on YouTube video pages (drawn by the browser, not by the website)
+if (window === window.top && /(^|\.)youtube\.com$/.test(location.hostname)) {
+  const tick = () => {
+    const ok = location.pathname === '/watch' || location.pathname.startsWith('/shorts/');
+    let b = document.getElementById('quark-dl');
+    if (!ok) { if (b) b.remove(); return; }
+    if (b || !document.body) return;
+    b = document.createElement('button');
+    b.id = 'quark-dl'; b.type = 'button'; b.textContent = '⬇  Download'; b.title = 'Download this video with Quark';
+    b.setAttribute('style', 'all:initial;display:block;position:fixed;top:68px;right:18px;z-index:2147483647;cursor:pointer;font:600 13px "Segoe UI",system-ui,sans-serif;color:#fff;background:linear-gradient(135deg,#22d3ee,#8b5cf6 60%,#f472b6);padding:9px 16px;border-radius:20px;box-shadow:0 4px 18px rgba(0,0,0,.45)');
+    b.addEventListener('click', e => { e.stopPropagation(); ipc.send('ytdl:open'); });
+    document.body.appendChild(b);
+  };
+  setInterval(tick, 1000);
+  window.addEventListener('DOMContentLoaded', tick);
 }

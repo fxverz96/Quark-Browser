@@ -53,10 +53,10 @@ async function show() {
     return;
   }
   if (v === 'settings') {
-    const t = await hub.data('getTheme'), dk = await hub.data('getDark');
+    const t = await hub.data('getTheme'), dk = await hub.data('getDark'), yt = await hub.data('getYt');
     list.innerHTML = `<div class="sec"><h2>Appearance</h2><div class="seg">` +
       ['dark', 'light', 'system'].map(x => `<button data-t="${x}" class="${x === t ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('') +
-      `</div></div><div class="sec"><h2>Dark mode for websites</h2><p class="dim">Turns websites dark when Quark is dark. Close and reopen Quark to apply.</p><div class="seg"><button data-k="1" class="${dk ? 'on' : ''}">On</button><button data-k="0" class="${dk ? '' : 'on'}">Off</button></div></div><div class="sec"><h2>Google account</h2><p class="dim">Sign in to use Gmail, YouTube and other Google sites in Quark.</p><button class="go" id="gl">Sign in with Gmail</button></div>`;
+      `</div></div><div class="sec"><h2>Dark mode for websites</h2><p class="dim">Turns websites dark when Quark is dark. Close and reopen Quark to apply.</p><div class="seg"><button data-k="1" class="${dk ? 'on' : ''}">On</button><button data-k="0" class="${dk ? '' : 'on'}">Off</button></div></div><div class="sec"><h2>Ad blocking on YouTube</h2><p class="dim">Off by default: blocking scripts can leave YouTube's player black. Turn on only if you want to try it.</p><div class="seg"><button data-yt="1" class="${yt ? 'on' : ''}">On</button><button data-yt="0" class="${yt ? '' : 'on'}">Off</button></div></div><div class="sec"><h2>Google account</h2><p class="dim">Sign in to use Gmail, YouTube and other Google sites in Quark.</p><button class="go" id="gl">Sign in with Gmail</button></div>`;
     const [pfs, prm, ex, ab] = await Promise.all([hub.data('profiles'), hub.data('perms'), hub.data('getExit'), hub.data('about')]);
     list.insertAdjacentHTML('beforeend', `<div class="sec"><h2>Profiles</h2><p class="dim">Each profile keeps its own logins, cookies and history. Use one per Gmail account.</p>` +
       pfs.map(p => `<div class="row"><span style="width:12px;height:12px;border-radius:50%;background:${esc(p.color)}"></span><div>${esc(p.name)}</div>${p.id === 'default' ? '<small>main</small>' : `<button data-pf="${esc(p.id)}">Delete</button>`}</div>`).join('') +
@@ -90,6 +90,7 @@ list.addEventListener('click', async e => {
   if (b.dataset.pnew) return hub.cmd('pfNew');
   if (b.dataset.pr) { await hub.data('permReset', b.dataset.pr); return show(); }
   if (b.dataset.ex !== undefined) { await hub.data('setExitAsk', b.dataset.ex === '1'); return show(); }
+  if (b.dataset.yt !== undefined) { await hub.data('setYt', b.dataset.yt === '1'); return show(); }
   if (b.dataset.k !== undefined) { await hub.data('setDark', b.dataset.k === '1'); return show(); }
   if (b.dataset.x) {
     const x = b.dataset.x;
