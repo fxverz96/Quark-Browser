@@ -1,10 +1,10 @@
 name: Build and release
 
 on:
-  workflow_dispatch:      # the "Run workflow" button on the Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write         # lets the build publish the release
+  contents: write
 
 jobs:
   build:
@@ -16,6 +16,22 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: node --check main.js
-      - run: npm run release
+      - run: npm run build
+      - name: Show build output
+        shell: bash
+        run: ls -la dist
+      - name: Publish release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          for f in dist/Quark-Setup.exe dist/Quark-Setup.exe.blockmap dist/latest.yml; do
+            test -f "$f" || { echo "Missing file: $f"; exit 1; }
+          done
+          if gh release view "v$VER" > /dev/null 2>&1; then
+            gh release upload "v$VER" dist/Quark-Setup.exe dist/Quark-Setup.exe.blockmap dist/latest.yml --clobber
+          else
+            gh release create "v$VER" dist/Quark-Setup.exe dist/Quark-Setup.exe.blockmap dist/latest.yml --title "Quark $VER" --notes "Quark $VER" --target "$GITHUB_SHA"
+          fi
