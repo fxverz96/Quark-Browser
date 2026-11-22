@@ -36,6 +36,12 @@ body{font:13px "Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--
 #shield.off{opacity:.4}
 #star{font-size:17px}
 #dl.pulse{color:var(--acc)}
+#dl{position:relative}
+#dlb{position:absolute;right:-2px;top:-2px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:var(--acc);color:#06201c;font:700 10px/15px "Segoe UI",sans-serif;text-align:center;font-style:normal;display:none}
+#dlb.on{display:block}
+#dlp{position:absolute;left:6px;right:6px;bottom:2px;height:3px;border-radius:2px;background:var(--line);display:none;text-decoration:none}
+#dlp.on{display:block}
+#dlp::after{content:"";display:block;height:100%;width:var(--p,0%);border-radius:2px;background:var(--acc)}
 .tab i.pdot{width:8px;height:8px;border-radius:50%}
 .av{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:600;color:#fff}
 browser-action-list{display:flex;align-items:center;margin-right:2px}
@@ -61,7 +67,7 @@ browser-action-list{display:flex;align-items:center;margin-right:2px}
     <button class="b" id="shield" title="Ad blocker (click to turn on/off)"></button>
     <button class="b" id="star" title="Bookmark this page">☆</button>
   </div>
-  <button class="b" id="dl" title="Downloads">⤓</button>
+  <button class="b" id="dl" title="Downloads">⤓<i id="dlb"></i><u id="dlp"></u></button>
   <browser-action-list alignment="bottom right"></browser-action-list>
   <button class="b" id="ext" title="Extensions"></button>
   <button class="b" id="acc" title="Sign in with Google"></button>
@@ -81,7 +87,7 @@ $('home').innerHTML = svg('M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10');
 $('ext').innerHTML = svg('M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7');
 const PERSON = svg('M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z');
 const LOGOS = { wa: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#25D366"/><path d="M12 5.2A6.8 6.8 0 0 0 6.1 15.4L5.2 18.8 8.7 17.9A6.8 6.8 0 1 0 12 5.2Z" fill="none" stroke="#fff" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.5 9.3C9.7 11.8 12.2 14.3 14.7 14.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/></svg>', tg: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#2AABEE"/><path d="M5.4 11.6 17.8 6.8 15.9 17.3 12.3 14.6 10 16.7 9.7 13.4Z" fill="#fff" stroke="#fff" stroke-width=".6" stroke-linejoin="round"/></svg>' };
-let S = { tabs: [] };
+let S = { tabs: [] }, lastRect = '';
 const pc = id => ((S.profiles || []).find(p => p.id === id) || {}).color || '#888';
 
 hub.onState(s => { S = s; render(); });
@@ -109,6 +115,10 @@ function render() {
   $('shield').textContent = '🛡 ' + (S.blocked || 0);
   $('shield').classList.toggle('off', !S.adblock);
   $('dl').classList.toggle('pulse', S.dl > 0);
+  $('dlb').className = (S.dl > 0 || S.dlUnseen > 0) ? 'on' : ''; $('dlb').textContent = S.dl > 0 ? S.dl : '✓';
+  $('dlp').className = S.dl > 0 && S.dlPct >= 0 ? 'on' : ''; $('dlp').style.setProperty('--p', S.dlPct + '%');
+  const rr = $('dl').getBoundingClientRect(), rk = Math.round(rr.right) + ',' + Math.round(rr.bottom);
+  if (rk !== lastRect) { lastRect = rk; cmd('dlrect', { x: rr.right, y: rr.bottom }); }
   const cp = (S.profiles || []).find(p => p.id === S.profile);
   setH($('acc'), cp && cp.id !== 'default' ? `<span class="av" style="background:${esc(cp.color)}">${esc(cp.name[0].toUpperCase())}</span>` : PERSON);
   $('acc').title = cp ? `Profile: ${cp.name}` : 'Profiles and Google sign-in';
@@ -142,7 +152,7 @@ $('ext').onclick = () => cmd('internal', 'extensions');
 $('acc').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); cmd('profile', { x: r.right, y: r.bottom }); };
 $('star').onclick = () => cmd('star');
 $('shield').onclick = () => cmd('shield');
-$('dl').onclick = () => cmd('internal', 'downloads');
+$('dl').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); cmd('dlcard', { x: r.right, y: r.bottom }); };
 $('menu').onclick = e => { const r = e.currentTarget.getBoundingClientRect(); cmd('menu', { x: r.left, y: r.bottom }); };
 $('url').addEventListener('focus', e => setTimeout(() => e.target.select()));
 $('url').addEventListener('keydown', e => {

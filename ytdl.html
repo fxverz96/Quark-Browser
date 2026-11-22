@@ -48,7 +48,7 @@ const dur = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.f
 const body = h => { $('body').innerHTML = h; };
 let opts = null, jobId = null;
 
-hub.onMsg(m => { if (m.type === 'install' && $('ip')) installProgress(m); if (m.type === 'job' && m.id === jobId) showJob(m); });
+hub.onMsg(m => { if (m.type === 'install' && $('ip')) installProgress(m); if (m.type === 'job' && m.id === jobId && m.state === 'error') showJob(m); });
 $('x').onclick = () => hub.cmd('ytClose');
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hub.cmd('ytClose'); });
 
@@ -86,19 +86,20 @@ function render() {
   const o = opts, L = o.langs;
   let h = `<div class="vid">${o.thumb ? `<img src="${esc(o.thumb)}" referrerpolicy="no-referrer">` : ''}<div><div class="t">${esc(o.title)}</div><small>${esc(o.uploader)}${o.duration ? ' · ' + dur(o.duration) : ''}</small></div></div>`;
   if (L.length > 1) h += `<span class="lb">Audio language (dubbing)</span><select id="lang">${L.map(l => `<option value="${esc(l.code)}">${esc(l.label)}</option>`).join('')}</select>`;
-  if (o.video.length) h += `<span class="lb">Video + audio</span><div class="list">${o.video.map((v, i) => `<label class="opt"><input type="radio" name="q" value="v:${v.height}" ${i === 0 ? 'checked' : ''}><span>${esc(v.label)}</span><small>${v.size ? '~' + mb(v.size) : ''}</small></label>`).join('')}</div>`;
-  h += `<span class="lb">Audio only</span><div class="list"><label class="opt"><input type="radio" name="q" value="a:mp3" ${o.video.length ? '' : 'checked'}><span>MP3</span><small>best quality</small></label><label class="opt"><input type="radio" name="q" value="a:m4a"><span>M4A (AAC)</span><small>smaller, no re-encoding when possible</small></label></div>`;
+  if (o.video.length) h += `<span class="lb">Video + audio</span><div class="list">${o.video.map((v, i) => `<label class="opt"><input type="radio" name="q" value="v:${v.height}" data-size="${v.size || 0}" ${i === 0 ? 'checked' : ''}><span>${esc(v.label)}</span><small>${v.size ? '~' + mb(v.size) : ''}</small></label>`).join('')}</div>`;
+  h += `<span class="lb">Audio only</span><div class="list"><label class="opt"><input type="radio" name="q" value="a:mp3" data-size="${o.audio.mp3 || 0}" ${o.video.length ? '' : 'checked'}><span>MP3</span><small>${o.audio.mp3 ? '~' + mb(o.audio.mp3) + ' · ' : ''}best quality</small></label><label class="opt"><input type="radio" name="q" value="a:m4a" data-size="${o.audio.m4a || 0}"><span>M4A (AAC)</span><small>${o.audio.m4a ? '~' + mb(o.audio.m4a) + ' · ' : ''}smaller</small></label></div>`;
   h += `<button class="go big" id="dl">Download</button><div id="job"></div>`;
   body(h);
   $('dl').onclick = start;
 }
 async function start() {
-  const [k, v] = document.querySelector('input[name=q]:checked').value.split(':'), sel = $('lang');
+  const picked = document.querySelector('input[name=q]:checked'), [k, v] = picked.value.split(':'), sel = $('lang');
   const lang = sel ? sel.value : (opts.langs[0] ? opts.langs[0].code : '');
   $('dl').disabled = true; $('job').innerHTML = '<p class="dim">Starting…</p>';
-  const r = await hub.data('ytStart', { url: URLV, mode: k === 'v' ? 'video' : v, height: k === 'v' ? +v : 0, lang, tagLang: !!sel && sel.selectedIndex > 0 });
+  const r = await hub.data('ytStart', { url: URLV, mode: k === 'v' ? 'video' : v, height: k === 'v' ? +v : 0, lang, tagLang: !!sel && sel.selectedIndex > 0, title: opts.title, size: +picked.dataset.size || 0 });
   if (r.error) { $('job').innerHTML = `<p class="err">${esc(r.error)}</p>`; $('dl').disabled = false; return; }
   jobId = r.id;
+  $('job').innerHTML = '<p class="ok">✓ Download started</p><small>Watch the progress under the toolbar\'s download button.</small>';
 }
 function showJob(m) {
   const j = $('job'); if (!j) return;

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, Menu, ipcMain, session, shell, dialog, clipboard, nativeTheme } = require('electron');
+const { app, BrowserWindow, WebContentsView, Menu, ipcMain, session, shell, dialog, clipboard, nativeTheme, Notification } = require('electron');
 const path = require('path'), fs = require('fs');
 const { pathToFileURL } = require('url');
 const { ElectronBlocker } = require('@ghostery/adblocker-electron');
@@ -199,7 +199,8 @@ function push() {
     active, tabs: tabs.map(({ id, title, icon, loading, profile }) => ({ id, title, icon, loading, profile })),
     url: internal(u) ? '' : u, secure: u.startsWith('https:') ? 'https' : u.startsWith('http:') ? 'http' : '', canBack: !!nav?.canGoBack(), canFwd: !!nav?.canGoForward(),
     starred: bookmarks.get().some(b => b.url === u), blocked, adblock,
-    dl: downloads.filter(d => d.state === 'progressing').length,
+    dl: downloads.filter(d => d.state === 'progressing').length, dlUnseen,
+    dlPct: (() => { const a = downloads.filter(d => d.state === 'progressing'), t = a.reduce((x, d) => x + (d.total || 0), 0), r = a.reduce((x, d) => x + (d.received || 0), 0); return t > 0 ? Math.min(100, Math.round(r / t * 100)) : -1; })(),
     side: side().map(({ id, name, icon, color }) => ({ id, name, icon, color })), panel: openPanel,
     profiles: profiles(), profile: tab()?.profile || 'default'
   });
@@ -376,11 +377,11 @@ function onDownload(_, item) {
       detail: `Downloaded from ${host || 'an unknown site'}. Only keep it if you trust this site.` })
       .then(r => { if (r.response !== 1) { item.cancel(); fs.unlink(p, () => {}); } });
   }
-  const d = { name: path.basename(p), path: p, received: 0, total: item.getTotalBytes(), state: 'progressing', item };
-  downloads.unshift(d);
-  item.on('updated', () => { d.received = item.getReceivedBytes(); d.total = item.getTotalBytes(); });
-  item.once('done', (_, s) => { d.state = s; push(); });
-  push();
+  const d = { id: 'd' + Date.now() + Math.random().toString(36).slice(2, 6), kind: 'file', name: path.basename(p), path: p, received: 0, total: item.getTotalBytes(), state: 'progressing', item, cancel: () => item.cancel() };
+  downloads.unshift(d); downloads.length = Math.min(downloads.length, 60);
+  item.on('updated', () => { d.received = item.getReceivedBytes(); d.total = item.getTotalBytes(); dlChanged(); });
+  item.once('done', (_, st) => { d.state = st; dlFinished(d); });
+  dlChanged();
 }
 
 /* ---------- Three-dot menu ---------- */
@@ -780,7 +781,7 @@ function canonYt(u) {
 function buildOptions(info) {
   const fm = info.formats || [];
   const hasV = f => f.vcodec && f.vcodec !== 'none', hasA = f => f.acodec && f.acodec !== 'none';
-  const size = f => (f && (f.filesize || f.filesize_approx)) || 0;
+  const size = f => !f ? 0 : (f.filesize || f.filesize_approx || ((f.tbr || f.vbr || f.abr) && info.duration ? Math.round((f.tbr || f.vbr || f.abr) * 125 * info.duration) : 0));
   const top = (list, key) => list.slice().sort((a, b) => (b[key] || b.tbr || 0) - (a[key] || a.tbr || 0))[0];
   const audios = fm.filter(f => hasA(f) && !hasV(f));
   const byLang = new Map();
@@ -798,7 +799,9 @@ function buildOptions(info) {
     const v = top(vids.filter(f => f.height === h), 'tbr');
     return { height: h, label: h + 'p' + (v.fps > 30 ? Math.round(v.fps) : ''), size: size(v) ? size(v) + (hasA(v) ? 0 : bestAudioSize) : 0 };
   });
-  return { id: info.id, title: info.title || '', uploader: info.uploader || info.channel || '', duration: info.duration || 0, thumb: /^https:/.test(info.thumbnail || '') ? info.thumbnail : '', video, langs };
+  const m4a = top(audios.filter(f => f.ext === 'm4a'), 'abr') || top(audios, 'abr');
+  const audio = { mp3: info.duration ? Math.round(info.duration * 245000 / 8) : 0, m4a: size(m4a) };
+  return { audio, id: info.id, title: info.title || '', uploader: info.uploader || info.channel || '', duration: info.duration || 0, thumb: /^https:/.test(info.thumbnail || '') ? info.thumbnail : '', video, langs };
 }
 
 const ytJobs = new Map();
@@ -850,27 +853,43 @@ function ytStart(o) {
   const tag = lang && o.tagLang ? ` [${lang}]` : '';
   const out = path.join(app.getPath('downloads'), `%(title).120B [%(id)s]${tag}.%(ext)s`);
   const args = ['--no-playlist', '--no-warnings', '--no-mtime', '--windows-filenames', '--no-colors', '--newline', '--progress',
-    '--progress-template', 'download:Q|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
+    '--progress-template', 'download:Q|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress._speed_str)s|%(progress._eta_str)s',
     '--print', 'after_move:FILE|%(filepath)s', '--ffmpeg-location', ffLoc(), '-o', out];
   if (mode === 'video') args.push('-f', `bv*[height<=${height}]+${ba}/bv*[height<=${height}]+ba/b[height<=${height}]/b`, '-S', 'res,vcodec:h264,acodec:aac', '--merge-output-format', 'mp4');
   else if (mode === 'mp3') args.push('-f', `${ba}/ba/b`, '-x', '--audio-format', 'mp3', '--audio-quality', '0');
   else args.push('-f', `${ba}[ext=m4a]/${ba}/ba[ext=m4a]/ba/b`, '-x', '--audio-format', 'm4a');
+  if (testMode() && process.env.SH_YT_LIMIT) args.push('--limit-rate', process.env.SH_YT_LIMIT);
   args.push('--', url);
-  const id = 'j' + Date.now(), job = { id, proc: null, file: '', cancelled: false };
+  const id = 'j' + Date.now(), job = { id, proc: null, file: '', cancelled: false, base: 0, last: 0, lastTotal: 0, seen: 0, est: Math.max(0, Math.round(+o.size) || 0) };
+  const entry = { id, kind: 'yt', name: String(o.title || 'YouTube video').slice(0, 150), path: '', received: 0, total: job.est, state: 'progressing', speed: '', eta: '', error: '', cancel: () => ytCancel(id) };
+  downloads.unshift(entry); downloads.length = Math.min(downloads.length, 60);
   ytJobs.set(id, job);
-  sendYt({ type: 'job', id, state: 'starting' });
+  sendYt({ type: 'job', id, state: 'starting' }); dlChanged();
   runYt(args, {
     timeout: 6 * 3600 * 1000,
     onProc: p => { job.proc = p; },
     onLine: l => {
-      if (l.startsWith('Q|')) { const [, pct, speed, eta] = l.split('|'); sendYt({ type: 'job', id, state: 'downloading', pct: parseFloat(pct) || 0, speed: (speed || '').trim(), eta: (eta || '').trim() }); }
-      else if (l.startsWith('FILE|')) job.file = l.slice(5);
+      if (l.startsWith('Q|')) {
+        const [, dlb, tb, te, speed, eta] = l.split('|');
+        const got = parseInt(dlb) || 0, st = parseInt(tb) || parseInt(te) || 0;
+        if (!job.seen || got < job.last) { if (job.seen) job.base += job.lastTotal || job.last; job.seen++; } // a new stream (audio after video) began
+        job.last = got; if (st) job.lastTotal = st;
+        entry.received = job.base + got;
+        entry.total = Math.max(entry.received, job.seen >= 2 && st ? job.base + st : Math.max(job.est, job.base + st));
+        entry.speed = (speed || '').trim().replace(/^Unknown.*$/, ''); entry.eta = (eta || '').trim().replace(/^Unknown$/, '');
+        sendYt({ type: 'job', id, state: 'downloading', pct: entry.total ? entry.received / entry.total * 100 : 0, speed: entry.speed, eta: entry.eta });
+        dlChanged();
+      } else if (l.startsWith('FILE|')) job.file = l.slice(5);
     }
   }).then(r => {
     ytJobs.delete(id);
-    if (job.cancelled) return sendYt({ type: 'job', id, state: 'cancelled' });
-    if (r.code === 0 && job.file) sendYt({ type: 'job', id, state: 'done', file: job.file });
-    else sendYt({ type: 'job', id, state: 'error', error: friendlyErr(r.err) });
+    if (job.cancelled) { entry.state = 'cancelled'; sendYt({ type: 'job', id, state: 'cancelled' }); }
+    else if (r.code === 0 && job.file) {
+      entry.state = 'completed'; entry.path = job.file; entry.name = path.basename(job.file);
+      try { entry.total = entry.received = fs.statSync(job.file).size; } catch {}
+      sendYt({ type: 'job', id, state: 'done', file: job.file });
+    } else { entry.state = 'interrupted'; entry.error = friendlyErr(r.err); sendYt({ type: 'job', id, state: 'error', error: entry.error }); }
+    dlFinished(entry);
   });
   return { id };
 }
@@ -878,6 +897,36 @@ function ytCancel(id) {
   const j = ytJobs.get(id); if (!j?.proc) return;
   j.cancelled = true;
   if (process.platform === 'win32') execFile('taskkill', ['/pid', String(j.proc.pid), '/T', '/F'], { windowsHide: true }, () => {}); else j.proc.kill('SIGTERM');
+}
+
+/* ---------- Download bubble (popup under the toolbar's download button) ---------- */
+let dlUnseen = 0, dlTimer = null, dlRect = { x: 0, y: 88 }, dcard = null, dcardClosed = 0;
+const dlView = d => ({ id: d.id, kind: d.kind, name: d.name, state: d.state, received: d.received, total: d.total, speed: d.speed || '', eta: d.eta || '', error: d.error || '' });
+function dlChanged() { // at most every 0.4 s: update the toolbar badge and the open popup
+  if (dlTimer) return;
+  dlTimer = setTimeout(() => {
+    dlTimer = null; push();
+    if (dcard && !dcard.isDestroyed()) dcard.webContents.send('msg', { type: 'dl', list: downloads.map(dlView) });
+  }, 400);
+}
+function dlFinished(d) {
+  if (d.state === 'completed') { dlUnseen++; try { new Notification({ title: 'Download complete', body: d.name }).show(); } catch {} }
+  dlChanged(); push();
+}
+function showDlCard({ x, y } = dlRect) {
+  if (dcard && !dcard.isDestroyed()) { dcard.close(); return; }
+  if (Date.now() - dcardClosed < 300) return; // that click is the one that just closed it
+  dlUnseen = 0; push();
+  const cb = win.getContentBounds(), W = 410;
+  dcard = new BrowserWindow({ parent: win, x: Math.max(cb.x, Math.round(cb.x + x - W)), y: Math.round(cb.y + y + 4), width: W, height: 220,
+    frame: false, resizable: false, movable: false, minimizable: false, maximizable: false, skipTaskbar: true, show: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#252b3a' : '#ffffff',
+    webPreferences: { preload: PRELOAD, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  dcard.setMenu(null);
+  dcard.once('ready-to-show', () => dcard && dcard.show());
+  dcard.on('blur', () => { if (dcard && !dcard.isDestroyed()) dcard.close(); });
+  dcard.on('closed', () => { dcardClosed = Date.now(); dcard = null; });
+  dcard.loadFile('dl.html');
 }
 
 /* ---------- Sidebar ---------- */
@@ -1066,6 +1115,17 @@ ipcMain.on('cmd', (e, c, a) => {
       else if (k === 'manage') openInternal('settings');
       break;
     }
+    case 'dlcard': showDlCard(a && isFinite(a.x) && isFinite(a.y) ? { x: +a.x, y: +a.y } : dlRect); break;
+    case 'dlrect': if (a && isFinite(a.x) && isFinite(a.y)) dlRect = { x: +a.x, y: +a.y }; break;
+    case 'dlcardSize': if (dcard && !dcard.isDestroyed() && e.sender === dcard.webContents) dcard.setContentSize(410, Math.min(Math.max(Math.round(+a) || 120, 120), 560)); break;
+    case 'dlAct': {
+      const d = downloads.find(x => x.id === a?.id); if (!d) break;
+      const inDl = d.path && path.resolve(d.path).startsWith(path.resolve(app.getPath('downloads')));
+      if (a.k === 'open' && d.state === 'completed' && inDl) shell.openPath(d.path);
+      else if (a.k === 'show' && inDl) shell.showItemInFolder(d.path);
+      else if (a.k === 'cancel' && d.state === 'progressing') d.cancel();
+      break;
+    }
     case 'pcardSize': if (pcard && !pcard.isDestroyed() && e.sender === pcard.webContents) pcard.setContentSize(340, Math.min(Math.max(Math.round(+a) || 200, 160), 660)); break;
     case 'google': addGmailFlow(tab()); break;
     case 'pfNew': addDialog('profile'); break;
@@ -1114,7 +1174,9 @@ ipcMain.handle('data', (e, what, a) => {
     case 'ytTools': return { ready: toolsMissing().length === 0, missing: toolsMissing().map(k => TOOL_INFO[k]) };
     case 'ytInstall': return (async () => { try { for (const n of toolsMissing()) await installTool(n, (got, total) => sendYt({ type: 'install', tool: TOOL_INFO[n].name, got, total })); return {}; } catch (err) { return { error: String(err.message || err) }; } })();
     case 'ytInfo': return ytInfo(a);
-    case 'ytStart': return ytStart(a || {});
+    case 'ytStart': { const r = ytStart(a || {}); if (!r.error) setTimeout(() => { if (ytWin && !ytWin.isDestroyed()) ytWin.close(); setTimeout(() => showDlCard(dlRect), 250); }, 800); return r; }
+    case 'dlList': return downloads.map(dlView);
+    case 'dlClear': { for (let i = downloads.length - 1; i >= 0; i--) if (downloads[i].state !== 'progressing') downloads.splice(i, 1); dlChanged(); return downloads.map(dlView); }
     case 'ytCancel': ytCancel(a); break;
     case 'ytUpdate': return ytUpdate();
     case 'getYt': return !!settings.get().ytAds;
@@ -1130,7 +1192,7 @@ ipcMain.handle('data', (e, what, a) => {
     case 'rmBookmark': { const b = bookmarks.get(), k = b.findIndex(x => x.url === a); if (k >= 0) b.splice(k, 1); bookmarks.save(); push(); break; }
     case 'dlOpen': if (d?.state === 'completed') shell.openPath(d.path); break;
     case 'dlShow': if (d) shell.showItemInFolder(d.path); break;
-    case 'dlCancel': if (d?.state === 'progressing') d.item.cancel(); break;
+    case 'dlCancel': if (d?.state === 'progressing') d.cancel(); break;
   }
   return [];
 });

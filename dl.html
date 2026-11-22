@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Downloads</title>
+<style>
+:root{--bg:#252b3a;--card:#2e3548;--line:#3a4358;--txt:#e8ebf2;--dim:#9aa3b8;--hov:#323b52;--acc:#2dd4bf}
+@media (prefers-color-scheme:light){:root{--bg:#ffffff;--card:#f3f5fa;--line:#dfe4ee;--txt:#1d2330;--dim:#5d6678;--hov:#e6eaf3;--acc:#0d9488}}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--txt);font:13px "Segoe UI",system-ui,sans-serif;padding:12px 12px 10px;user-select:none}
+.head{display:flex;align-items:center;justify-content:space-between;padding:2px 4px 10px}
+.head b{font-size:15px}
+.head span{display:flex;gap:6px}
+button{font:inherit;cursor:pointer;border:0;color:var(--txt);background:var(--hov);border-radius:14px;padding:4px 12px}
+button:hover{filter:brightness(1.15)}
+.list{display:flex;flex-direction:column;gap:8px}
+.row{background:var(--card);border-radius:12px;padding:10px 12px}
+.top{display:flex;align-items:center;gap:8px}
+.name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.x{width:24px;height:24px;border-radius:50%;padding:0;background:none;color:var(--dim)}
+.x:hover{background:var(--hov)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:8px 0 5px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#8b5cf6,#f472b6);transition:width .4s}
+.bar.unk i{width:35%;animation:s 1.2s ease-in-out infinite alternate}
+@keyframes s{from{margin-left:0}to{margin-left:65%}}
+small{color:var(--dim);font-size:12px}
+.ok{color:var(--acc);font-weight:600}
+.err{color:#f87171}
+.act{display:flex;gap:6px;margin-top:8px}
+.empty{padding:22px 4px;text-align:center;color:var(--dim)}
+.foot{display:flex;justify-content:flex-end;padding:10px 4px 0}
+.foot a{color:var(--dim);font-size:12px;cursor:pointer;text-decoration:underline}
+</style></head>
+<body>
+<div class="head"><b>Downloads</b><span><button id="clr">Clear finished</button></span></div>
+<div id="list" class="list"></div>
+<div class="foot"><a id="all">Show all downloads</a></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const mb = b => b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' MB' : b ? Math.max(1, Math.round(b / 1e3)) + ' KB' : '0 MB';
+function row(d) {
+  const nm = esc(d.name || 'Download');
+  if (d.state === 'progressing') {
+    const known = d.total > 0, pct = known ? Math.min(100, d.received / d.total * 100) : 0;
+    return `<div class="row"><div class="top"><div class="name" title="${nm}">${nm}</div><button class="x" data-k="cancel" data-id="${esc(d.id)}" title="Cancel">✕</button></div>
+      <div class="bar ${known ? '' : 'unk'}"><i style="width:${pct.toFixed(1)}%"></i></div>
+      <small>${mb(d.received)}${known ? ' of ' + mb(d.total) : ''}${d.speed ? ' · ' + esc(d.speed) : ''}${d.eta ? ' · ' + esc(d.eta) + ' left' : ''}${known && pct >= 99.5 ? ' · finishing…' : ''}</small></div>`;
+  }
+  if (d.state === 'completed') return `<div class="row"><div class="top"><div class="name" title="${nm}"><span class="ok">✓</span> ${nm}</div></div><small>${mb(d.total || d.received)} · Download complete</small>
+      <div class="act"><button data-k="open" data-id="${esc(d.id)}">Open</button><button data-k="show" data-id="${esc(d.id)}">Show in folder</button></div></div>`;
+  return `<div class="row"><div class="top"><div class="name" title="${nm}">${nm}</div></div><small class="err">${d.state === 'cancelled' ? 'Cancelled' : 'Failed' + (d.error ? ': ' + esc(d.error) : '')}</small></div>`;
+}
+function render(list) {
+  $('list').innerHTML = list.length ? list.slice(0, 12).map(row).join('') : '<div class="empty">No downloads yet.</div>';
+  hub.cmd('dlcardSize', document.documentElement.scrollHeight);
+}
+hub.onMsg(m => { if (m.type === 'dl') render(m.list); });
+hub.data('dlList').then(render);
+$('clr').onclick = async () => render(await hub.data('dlClear'));
+$('all').onclick = () => hub.cmd('internal', 'downloads');
+$('list').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) hub.cmd('dlAct', { k: b.dataset.k, id: b.dataset.id }); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') window.close(); });
+</script></body></html>
