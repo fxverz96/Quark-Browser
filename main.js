@@ -21,6 +21,9 @@ const ageDays = () => Math.floor((Date.now() - BUILT) / 864e5);
 
 // The browser was renamed; keep using the original data folder so profiles, logins and settings carry over
 app.setPath('userData', path.join(app.getPath('appData'), 'StreamHub'));
+process.on('uncaughtException', err => { // keep running; note the problem in a log file instead of a crash dialog
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'error.log'), `${new Date().toISOString()} ${(err && err.stack) || err}\n`); } catch {}
+});
 const CHROME_H = 88; // tab strip 40 + toolbar 48
 const SIDE_W = 52, PANEL_W = 580;
 const ICON = path.join(__dirname, 'icon.ico');
@@ -57,6 +60,7 @@ if (!settings.get().shortcuts) { settings.get().shortcuts = scDefaults; settings
 const shortcuts = () => settings.get().shortcuts;
 if (!settings.get().profiles) { settings.get().profiles = [{ id: 'default', name: 'Personal', color: '#2dd4bf' }]; settings.save(); }
 const profiles = () => settings.get().profiles;
+if (!settings.get().exitFix) { const st = settings.get(); delete st.exitDefaults; st.exitAuto = {}; st.exitAsk = true; st.exitFix = 1; settings.save(); }
 const PCOL = ['#f59e0b', '#ef4444', '#8b5cf6', '#3b82f6', '#ec4899', '#10b981', '#f97316'];
 const sesOf = id => id === 'default' ? session.defaultSession : session.fromPartition('persist:' + id);
 const panels = {};
@@ -545,12 +549,14 @@ async function wipe(o = {}) {
     if (o.history) { const h = hist(p.id); h.get().length = 0; h.save(); }
   }
 }
-async function finishExit(o) { try { await wipe(o); } catch {} exitOk = true; app.quit(); }
+async function flushAll() { for (const p of profiles()) { try { const ses = sesOf(p.id); await ses.cookies.flushStore(); ses.flushStorageData(); } catch {} } }
+async function finishExit(o) { try { await wipe(o); } catch {} await flushAll(); exitOk = true; app.quit(); }
 function askExit() {
   if (exitDlg && !exitDlg.isDestroyed()) return exitDlg.focus();
   exitDlg = new BrowserWindow({ parent: win, modal: true, width: 480, height: 430, resizable: false, minimizable: false, maximizable: false,
     title: 'Close Quark', icon: ICON, backgroundColor: tbColors().color, webPreferences: { preload: PRELOAD } });
   exitDlg.setMenu(null);
+  exitDlg.on('closed', () => { exitDlg = null; if (!exitOk && !tabs.length && win && !win.isDestroyed()) newTab(); });
   exitDlg.loadFile('exit.html');
 }
 function staleWarning() {
@@ -582,7 +588,7 @@ function getUpdater() { // only in the installed Windows app
       updBusy = false;
       const r = await dialog.showMessageBox(win, { type: 'info', buttons: ['Restart and update', 'Later'], defaultId: 0, cancelId: 1,
         message: `Quark ${info.version} is ready to install`, detail: 'Quark will close and reopen with the new version. Your profiles and logins stay.' });
-      if (r.response === 0) { exitOk = true; autoUpdater.quitAndInstall(false, true); }
+      if (r.response === 0) { exitOk = true; await flushAll(); autoUpdater.quitAndInstall(false, true); }
     });
     autoUpdater.on('error', e => { updBusy = false; if (updManual) dialog.showMessageBox(win, { type: 'warning', message: 'Could not check for updates', detail: String(e.message || e).slice(0, 300) }); });
     upd = autoUpdater;
@@ -1094,7 +1100,7 @@ ipcMain.on('cmd', (e, c, a) => {
     case 'proceed': proceed(wc, a); break;
     case 'back': wc?.navigationHistory.goBack(); break;
     case 'forward': wc?.navigationHistory.goForward(); break;
-    case 'reload': wc?.isLoading() ? wc.stop() : wc.reload(); break;
+    case 'reload': if (wc) { if (wc.isLoading()) wc.stop(); else wc.reload(); } break;
     case 'new': newTab(); break;
     case 'close': closeTab(a); break;
     case 'switch': switchTab(a); break;
@@ -1135,7 +1141,7 @@ ipcMain.on('cmd', (e, c, a) => {
     case 'pfAdd': { const gm = pendingGmail, p = addProfile(a); BrowserWindow.fromWebContents(e.sender)?.close(); if (p) newTab(gm ? GOOGLE_LOGIN : NEWTAB, { profile: p.id }); break; }
     case 'exitDo': {
       const st = settings.get(), o = { cookies: !!a?.cookies, history: !!a?.history, cache: !!a?.cache };
-      st.exitDefaults = o; if (a?.remember) { st.exitAsk = false; st.exitAuto = o; } settings.save();
+      if (a?.remember) { st.exitAsk = false; st.exitAuto = o; } settings.save();
       BrowserWindow.fromWebContents(e.sender)?.close(); finishExit(o); break;
     }
     case 'exitCancel': BrowserWindow.fromWebContents(e.sender)?.close(); break;
@@ -1166,8 +1172,8 @@ ipcMain.handle('data', (e, what, a) => {
       else { const [o, p] = String(a).split('|'); if (perms()[o]) { delete perms()[o][p]; if (!Object.keys(perms()[o]).length) delete perms()[o]; } }
       settings.save(); break;
     }
-    case 'getExit': return { ...(settings.get().exitDefaults || {}), ask: settings.get().exitAsk !== false };
-    case 'setExitAsk': settings.get().exitAsk = !!a; settings.save(); break;
+    case 'getExit': return { ask: settings.get().exitAsk !== false, auto: settings.get().exitAuto || {} };
+    case 'setExitAsk': settings.get().exitAsk = !!a; if (!a) settings.get().exitAuto = {}; settings.save(); break;
     case 'about': return { version: app.getVersion(), built: new Date(BUILT).toDateString(), age: ageDays(), chromium: process.versions.chrome, electron: process.versions.electron };
     case 'getTheme': return theme();
     case 'shortcuts': return shortcuts();
