@@ -48,6 +48,7 @@ const sideDefaults = [
 ];
 if (!settings.get().sidebar) { settings.get().sidebar = sideDefaults; settings.save(); }
 const side = () => settings.get().sidebar;
+if (!settings.get().liveAdded) { const sb = settings.get().sidebar; sb.splice(Math.min(2, sb.length), 0, { id: 'livetv', name: 'Live TV', url: 'quark://livetv', color: '#8b5cf6' }); settings.get().liveAdded = 1; settings.save(); }
 const scDefaults = [
   { name: 'YouTube', url: 'https://www.youtube.com', icon: 'youtube.svg' },
   { name: 'Facebook', url: 'https://www.facebook.com', icon: 'facebook.svg' },
@@ -181,11 +182,13 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('before-input-event', onKey);
   win.on('resize', layout);
+  for (const ev of ['move', 'minimize', 'restore', 'enter-full-screen', 'leave-full-screen']) win.on(ev, () => placeLive());
   win.webContents.once('did-finish-load', () => newTab());
 }
 
 function layout() {
   if (!win || win.isDestroyed()) return;
+  setImmediate(placeLive);
   const [w, h] = win.getContentSize(), top = htmlFS ? 0 : CHROME_H, left = htmlFS ? 0 : SIDE_W;
   const pw = openPanel && !htmlFS ? Math.min(PANEL_W, w - left - 40) : 0; // panel floats over the page
   tabs.forEach(t => t.view.setBounds({ x: left, y: top, width: w - left, height: h - top }));
@@ -205,7 +208,7 @@ function push() {
     starred: bookmarks.get().some(b => b.url === u), blocked, adblock,
     dl: downloads.filter(d => d.state === 'progressing').length, dlUnseen,
     dlPct: (() => { const a = downloads.filter(d => d.state === 'progressing'), t = a.reduce((x, d) => x + (d.total || 0), 0), r = a.reduce((x, d) => x + (d.received || 0), 0); return t > 0 ? Math.min(100, Math.round(r / t * 100)) : -1; })(),
-    side: side().map(({ id, name, icon, color }) => ({ id, name, icon, color })), panel: openPanel,
+    side: side().map(({ id, name, icon, color }) => ({ id, name, icon, color })), panel: openPanel || (live.tabId && active === live.tabId ? 'livetv' : null),
     profiles: profiles(), profile: tab()?.profile || 'default'
   });
 }
@@ -237,7 +240,7 @@ function newTab(url = NEWTAB, opts = {}) {
   wc.on('page-favicon-updated', (_, icons) => { t.icon = icons[0] || ''; push(); });
   wc.on('did-start-loading', () => { t.loading = true; push(); });
   wc.on('did-stop-loading', () => { t.loading = false; push(); });
-  wc.on('did-navigate', () => push());
+  wc.on('did-navigate', () => { if (t.id === live.tabId && !wc.getURL().startsWith(LIVE_URL)) liveStop(true); push(); });
   wc.on('did-navigate-in-page', () => push());
   const nav = d => {
     if (isAddSession(d.url) && !t.allowAdd) { d.preventDefault(); addGmailFlow(t, d.url, true); return; }
@@ -289,6 +292,7 @@ function closeTab(id) {
   const i = tabs.findIndex(t => t.id === id);
   if (i < 0) return;
   const [t] = tabs.splice(i, 1);
+  if (t.id === live.tabId) liveStop(true);
   win.contentView.removeChildView(t.view);
   t.view.webContents.close();
   if (!tabs.length) return win.close();
@@ -676,7 +680,7 @@ const crypto = require('crypto');
 const EXE = process.platform === 'win32' ? '.exe' : '';
 const testMode = () => !app.isPackaged;
 const toolsDir = () => (testMode() && process.env.SH_TOOLSDIR) || path.join(app.getPath('userData'), 'components');
-const TOOL_FILE = { ytdlp: 'yt-dlp', deno: 'deno', ffmpeg: 'ffmpeg' };
+const TOOL_FILE = { ytdlp: 'yt-dlp', deno: 'deno', ffmpeg: 'ffmpeg', mpv: 'mpv', '7zr': '7zr' };
 const toolPath = n => (testMode() && process.env['SH_' + n.toUpperCase()]) || path.join(toolsDir(), TOOL_FILE[n] + EXE);
 const TOOL_INFO = { ytdlp: { name: 'yt-dlp (video fetcher)', mb: 24 }, deno: { name: 'Deno (runs YouTube\'s scripts)', mb: 43 }, ffmpeg: { name: 'FFmpeg (joins video + audio, makes MP3)', mb: 115 } };
 const toolsMissing = () => Object.keys(TOOL_INFO).filter(n => !fs.existsSync(toolPath(n)));
@@ -935,6 +939,267 @@ function showDlCard({ x, y } = dlRect) {
   dcard.loadFile('dl.html');
 }
 
+/* ---------- Live TV (mpv plays inside the browser) ---------- */
+const os = require('os'), net = require('net');
+const LIVE_URL = page('livetv.html');
+const LIVE_OK = /^(https?|rtmps?|rtsp|udp|srt):\/\//i;
+const liveCfg = () => (settings.get().live ||= { sources: [], favs: [], separate: false, volume: 100 });
+const liveDir = () => { const d = path.join(app.getPath('userData'), 'live'); fs.mkdirSync(d, { recursive: true }); return d; };
+const liveCache = {};
+const live = { proc: null, sock: null, buf: '', host: null, tabId: 0, rect: null, fs: false, reqId: 0, pend: new Map(), autoPaused: false, timer: null,
+  st: { name: '', playing: false, paused: false, buffering: false, mute: false, volume: 100, error: '' } };
+const hash10 = s => crypto.createHash('md5').update(s).digest('hex').slice(0, 10);
+const getTextUA = async (u, ms = 30000) => { const r = await fetch(u, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(ms) }); if (!r.ok) throw new Error('HTTP ' + r.status); const t = await r.text(); if (t.length > 80e6) throw new Error('That list is too large'); return t; };
+
+function parseM3U(text) { // channels from an IPTV playlist (#EXTINF ... then the stream link)
+  const out = []; let cur = null;
+  for (let line of text.split(/\r?\n/)) {
+    line = line.trim(); if (!line) continue;
+    if (line.startsWith('#EXTINF')) {
+      const a = {}; line.replace(/([\w-]+)="([^"]*)"/g, (_, k, v) => (a[k.toLowerCase()] = v));
+      cur = { n: line.slice(line.lastIndexOf(',') + 1).trim() || a['tvg-name'] || 'Channel', g: a['group-title'] || '', l: /^https?:\/\//.test(a['tvg-logo'] || '') ? a['tvg-logo'] : '', ua: '', ref: '' };
+    } else if (line.startsWith('#EXTVLCOPT:') && cur) {
+      const m = /^#EXTVLCOPT:http-(user-agent|referrer|referer)=(.*)$/i.exec(line);
+      if (m) { if (/user/i.test(m[1])) cur.ua = m[2]; else cur.ref = m[2]; }
+    } else if (line[0] !== '#' && cur) {
+      let u = line; const bar = u.indexOf('|');
+      if (bar > 0 && /^https?:/i.test(u)) { // Kodi style: link|User-Agent=..&Referer=..
+        for (const p of u.slice(bar + 1).split('&')) { const [k, ...v] = p.split('='), val = decodeURIComponent(v.join('=')); if (/^user-agent$/i.test(k)) cur.ua = val; else if (/^referer$/i.test(k)) cur.ref = val; }
+        u = u.slice(0, bar);
+      }
+      if (LIVE_OK.test(u)) out.push({ ...cur, k: hash10(u + out.length), u });
+      cur = null;
+    }
+  }
+  return out;
+}
+
+const stBase = u => u.replace(/\/manifest\.json(\?.*)?$/i, '');
+async function stremioChannels(src) { // Stremio add-on: channels come from its catalogs
+  const man = JSON.parse(await getTextUA(src.url)), base = stBase(src.url), out = [], seen = new Set();
+  for (const cat of (man.catalogs || []).slice(0, 12)) {
+    const req = (cat.extra || []).filter(e => e.isRequired);
+    let extra = '';
+    if (req.length) { if (req.every(e => Array.isArray(e.options) && e.options.length)) extra = req.map(e => `${e.name}=${encodeURIComponent(e.options[0])}`).join('&'); else continue; }
+    for (let skip = 0, pg = 0; pg < 5; pg++) {
+      const ex = [extra, skip ? 'skip=' + skip : ''].filter(Boolean).join('&');
+      let j; try { j = JSON.parse(await getTextUA(`${base}/catalog/${cat.type}/${cat.id}${ex ? '/' + ex : ''}.json`)); } catch { break; }
+      const metas = j.metas || []; if (!metas.length) break;
+      for (const m of metas) {
+        const k = hash10(`${cat.type}|${m.id}`); if (seen.has(k)) continue; seen.add(k);
+        const pic = m.logo || m.poster || '';
+        out.push({ k, n: String(m.name || m.id), g: cat.name || cat.type, l: /^https:\/\//.test(pic) ? pic : '', x: { type: m.type || cat.type, id: m.id } });
+      }
+      skip += metas.length; if (metas.length < 20) break;
+    }
+  }
+  return out;
+}
+async function stremioStream(src, x) {
+  const j = JSON.parse(await getTextUA(`${stBase(src.url)}/stream/${x.type}/${encodeURIComponent(x.id)}.json`));
+  const s = (j.streams || []).find(z => LIVE_OK.test(z.url || ''));
+  if (!s) throw new Error('This add-on gave no playable link (torrent-only and external links are not supported yet)');
+  const rq = (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) || {};
+  return { url: s.url, ua: rq['User-Agent'] || rq['user-agent'] || '', ref: rq.Referer || rq.referer || '',
+    headers: Object.entries(rq).filter(([k]) => !/^(user-agent|referer)$/i.test(k)).map(([k, v]) => `${k}: ${v}`) };
+}
+
+async function liveLoad(src, force) {
+  if (liveCache[src.id] && !force) return liveCache[src.id];
+  const f = path.join(liveDir(), src.id + '.json');
+  if (!force) { try { if (Date.now() - fs.statSync(f).mtimeMs < 12 * 3600e3) return (liveCache[src.id] = JSON.parse(fs.readFileSync(f, 'utf8'))); } catch {} }
+  let list;
+  try {
+    if (src.type === 'm3u') list = parseM3U(await getTextUA(src.url));
+    else if (src.type === 'stremio') list = await stremioChannels(src);
+    else list = [{ k: hash10(src.url), n: src.name, g: '', l: '', u: src.url }];
+  } catch (e) { try { return (liveCache[src.id] = JSON.parse(fs.readFileSync(f, 'utf8'))); } catch {} throw e; }
+  liveCache[src.id] = list; try { fs.writeFileSync(f, JSON.stringify(list)); } catch {}
+  return list;
+}
+
+async function liveAdd(raw, name) {
+  const url = String(raw || '').trim();
+  if (!/^https?:\/\//i.test(url)) throw new Error('Paste a link that starts with http:// or https://');
+  let text = ''; try { text = await getTextUA(url, 40000); } catch (e) { text = ''; if (/\.(m3u8?|ts|mpd|flv)(\?|$)/i.test(url)) text = '#EXT-X-TARGETDURATION'; else throw new Error('Could not open that link (' + (e.message || e) + ')'); }
+  let type = '';
+  if (text.trim()[0] === '{') { try { const j = JSON.parse(text); if (j.resources || j.catalogs) type = 'stremio'; } catch {} }
+  else if (/#EXT-X-(STREAM-INF|TARGETDURATION|MEDIA-SEQUENCE)/.test(text)) type = 'stream';
+  else if (/#EXTINF/.test(text)) type = 'm3u';
+  if (!type) throw new Error('This link is not an M3U playlist, a Stremio add-on manifest or a stream');
+  let nm = String(name || '').trim().slice(0, 40);
+  if (!nm) { try { nm = type === 'stremio' ? JSON.parse(text).name : new URL(url).hostname; } catch { nm = 'My source'; } }
+  const src = { id: 's' + Date.now().toString(36), type, name: nm || 'My source', url };
+  const list = await liveLoad(src, true);
+  if (!list.length) throw new Error('No playable channels were found in that source');
+  liveCfg().sources.push(src); settings.save();
+  return { id: src.id, name: src.name, type, count: list.length };
+}
+
+async function liveList(srcId, q = {}) {
+  const src = liveCfg().sources.find(s => s.id === srcId); if (!src) return { total: 0, all: 0, groups: [], items: [] };
+  const all = await liveLoad(src), favs = new Set(liveCfg().favs), qq = String(q.q || '').trim().toLowerCase();
+  const groups = [...new Set(all.map(c => c.g).filter(Boolean))].sort();
+  const list = all.filter(c => (!qq || c.n.toLowerCase().includes(qq)) && (!q.group || c.g === q.group) && (!q.fav || favs.has(srcId + '|' + c.k)));
+  return { total: list.length, all: all.length, groups, items: list.slice(+q.offset || 0, (+q.offset || 0) + 300).map(c => ({ k: c.k, n: c.n, g: c.g, l: c.l, f: favs.has(srcId + '|' + c.k) })) };
+}
+
+/* -- mpv player, drawn inside a borderless window that sits exactly over the page's video area -- */
+function sendLt(m) { const t = tabs.find(x => x.id === live.tabId); if (t && !t.view.webContents.isDestroyed()) t.view.webContents.send('msg', m); }
+function livePush() { if (live.timer) return; live.timer = setTimeout(() => { live.timer = null; sendLt({ type: 'lt', st: { ...live.st, fs: live.fs } }); }, 120); }
+
+function ensureLiveHost() {
+  if (live.host && !live.host.isDestroyed()) return live.host;
+  live.host = new BrowserWindow({ parent: win, frame: false, show: false, skipTaskbar: true, resizable: false, movable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, backgroundColor: '#000000', webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  live.host.setMenu(null);
+  live.host.loadURL('data:text/html,<body style="margin:0;background:#000"></body>');
+  live.host.on('closed', () => { live.host = null; });
+  return live.host;
+}
+const hwndOf = w => { const b = w.getNativeWindowHandle(); return String(b.length >= 8 ? b.readBigUInt64LE(0) : b.readUInt32LE(0)); };
+
+function placeLive() { // keep the video window over the page's video area; hide it when that tab is not in front
+  const h = live.host; if (!h || h.isDestroyed() || !win || win.isDestroyed()) return;
+  const onTab = !!live.tabId && active === live.tabId && tabs.some(t => t.id === live.tabId);
+  if (live.sock && !live.sock.destroyed) {
+    if (!onTab && !live.autoPaused && !live.st.paused) { live.autoPaused = true; mpvSend(['set_property', 'pause', true]).catch(() => {}); }
+    else if (onTab && live.autoPaused) { live.autoPaused = false; mpvSend(['set_property', 'pause', false]).catch(() => {}); }
+  }
+  const cb = win.getContentBounds();
+  let b = null;
+  if (onTab && !win.isMinimized() && !liveCfg().separate) {
+    if (live.fs) b = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
+    else if (live.rect && !openPanel) { const r = live.rect; b = { x: Math.round(cb.x + SIDE_W + r.x), y: Math.round(cb.y + CHROME_H + r.y), width: Math.max(1, Math.round(r.w)), height: Math.max(1, Math.round(r.h)) }; }
+  }
+  if (!b) { if (h.isVisible()) h.hide(); return; }
+  h.setBounds(b); if (!h.isVisible()) h.showInactive();
+}
+
+function mpvSend(command) {
+  return new Promise((res, rej) => {
+    if (!live.sock || live.sock.destroyed) return rej(new Error('The player is not running'));
+    const id = ++live.reqId; live.pend.set(id, { res, rej });
+    live.sock.write(JSON.stringify({ command, request_id: id }) + '\n');
+    setTimeout(() => { if (live.pend.delete(id)) rej(new Error('The player did not answer')); }, 8000);
+  });
+}
+function mpvLine(line) {
+  let m; try { m = JSON.parse(line); } catch { return; }
+  if (m.request_id && live.pend.has(m.request_id)) { const p = live.pend.get(m.request_id); live.pend.delete(m.request_id); if (m.error === 'success') p.res(m.data); else p.rej(new Error(m.error)); return; }
+  const st = live.st;
+  if (m.event === 'property-change') {
+    if (m.name === 'pause') st.paused = !!m.data; else if (m.name === 'mute') st.mute = !!m.data;
+    else if (m.name === 'volume') st.volume = Math.round(m.data || 0); else if (m.name === 'paused-for-cache') st.buffering = !!m.data;
+  } else if (m.event === 'start-file') { st.playing = false; st.buffering = true; st.error = ''; }
+  else if (m.event === 'file-loaded') { st.playing = true; st.buffering = false; st.error = ''; }
+  else if (m.event === 'end-file') { st.playing = false; st.buffering = false; if (m.reason === 'error') st.error = 'This stream could not be played' + (m.file_error ? ' (' + m.file_error + ')' : ''); }
+  else if (m.event === 'client-message' && m.args && m.args[0] === 'quark') { if (m.args[1] === 'fs') liveFs(!live.fs); else if (m.args[1] === 'esc' && live.fs) liveFs(false); }
+  livePush();
+}
+function connectPipe(pipe, proc) {
+  return new Promise((res, rej) => {
+    const t0 = Date.now(); let dead = false;
+    proc.once('exit', () => { dead = true; });
+    const tryOnce = () => {
+      if (dead) return rej(new Error('The player closed right after starting'));
+      if (Date.now() - t0 > 8000) return rej(new Error('The player did not start'));
+      const s = net.connect(pipe);
+      s.once('connect', () => res(s));
+      s.once('error', () => setTimeout(tryOnce, 150));
+    };
+    tryOnce();
+  });
+}
+
+async function ensureMpv() {
+  if (live.proc && live.sock && !live.sock.destroyed) return;
+  const exe = toolPath('mpv');
+  if (!fs.existsSync(exe)) throw new Error('The player (mpv) is not installed yet');
+  const sep = liveCfg().separate;
+  let hwnd = '';
+  if (!sep) { const h = ensureLiveHost(); placeLive(); hwnd = hwndOf(h); }
+  const id = crypto.randomBytes(6).toString('hex');
+  const pipe = process.platform === 'win32' ? `\\\\.\\pipe\\quark-mpv-${id}` : path.join(os.tmpdir(), `quark-mpv-${id}.sock`);
+  const conf = path.join(liveDir(), 'input.conf');
+  fs.writeFileSync(conf, 'f script-message quark fs\nESC script-message quark esc\nMBTN_LEFT_DBL script-message quark fs\n');
+  const args = ['--no-config', '--idle=yes', '--force-window=yes', '--keep-open=yes', `--input-ipc-server=${pipe}`, `--input-conf=${conf}`,
+    '--hwdec=auto-safe', '--cache=yes', '--cache-secs=30', '--demuxer-readahead-secs=20', '--demuxer-max-bytes=96MiB', '--network-timeout=20',
+    '--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5', '--audio-display=no', '--sub-auto=no', '--osd-level=1',
+    `--user-agent=${UA}`, `--volume=${liveCfg().volume || 100}`, '--title=Quark Live TV', '--msg-level=all=error'];
+  if (testMode() && process.env.SH_MPV_VO) args.push('--vo=' + process.env.SH_MPV_VO);
+  if (testMode() && process.env.SH_MPV_AO) args.push('--ao=' + process.env.SH_MPV_AO);
+  if (sep) args.push('--osc=yes'); else args.push('--osc=no', '--no-border', '--wid=' + hwnd);
+  const proc = spawn(exe, args, { env: procEnv(), windowsHide: false, stdio: 'ignore' });
+  live.proc = proc; live.args = args;
+  proc.on('exit', () => { if (live.proc === proc) { live.proc = null; if (live.sock) live.sock.destroy(); live.sock = null; live.st.playing = false; live.st.buffering = false; livePush(); } });
+  proc.on('error', () => { live.st.error = 'Could not start the player'; livePush(); });
+  try { live.sock = await connectPipe(pipe, proc); } catch (e) { try { proc.kill(); } catch {} live.proc = null; throw e; }
+  live.buf = '';
+  live.sock.on('data', d => { live.buf += d; let i; while ((i = live.buf.indexOf('\n')) >= 0) { mpvLine(live.buf.slice(0, i)); live.buf = live.buf.slice(i + 1); } });
+  live.sock.on('close', () => { live.sock = null; });
+  live.sock.on('error', () => {});
+  let n = 0;
+  for (const p of ['pause', 'mute', 'volume', 'paused-for-cache']) await mpvSend(['observe_property', ++n, p]).catch(() => {});
+}
+
+async function livePlay(srcId, key) {
+  const src = liveCfg().sources.find(s => s.id === srcId); if (!src) throw new Error('That source was removed');
+  const c = (await liveLoad(src)).find(x => x.k === key); if (!c) throw new Error('Channel not found');
+  let url = c.u, hd = { ua: c.ua || '', ref: c.ref || '', headers: [] };
+  live.st = { ...live.st, name: c.n, error: '', playing: false, buffering: true };
+  livePush();
+  if (c.x) { const r = await stremioStream(src, c.x); url = r.url; hd = { ua: r.ua, ref: r.ref, headers: r.headers }; }
+  if (!LIVE_OK.test(url || '')) throw new Error('This link type is not supported');
+  await ensureMpv();
+  await mpvSend(['set_property', 'user-agent', hd.ua || UA]);
+  await mpvSend(['set_property', 'referrer', hd.ref || '']);
+  await mpvSend(['set_property', 'http-header-fields', hd.headers || []]);
+  await mpvSend(['loadfile', url, 'replace']);
+  await mpvSend(['set_property', 'pause', false]);
+}
+
+function liveFs(on) { live.fs = !!on; win.setFullScreen(live.fs); setTimeout(placeLive, 80); livePush(); }
+function liveStop(kill) {
+  if (kill) { try { live.proc && live.proc.kill(); } catch {} live.proc = null; if (live.sock) live.sock.destroy(); live.sock = null; live.tabId = 0; live.rect = null; live.autoPaused = false; }
+  else mpvSend(['stop']).catch(() => {});
+  if (live.fs) { live.fs = false; if (win && !win.isDestroyed()) win.setFullScreen(false); }
+  live.st = { ...live.st, name: kill ? '' : live.st.name, playing: false, buffering: false };
+  if (live.host && !live.host.isDestroyed()) live.host.hide();
+  if (kill) push();
+}
+app.on('before-quit', () => liveStop(true));
+
+function openLiveTv() {
+  const t = tabs.find(x => x.view.webContents.getURL().startsWith(LIVE_URL));
+  if (openPanel) showPanel(null);
+  if (t) switchTab(t.id); else newTab(LIVE_URL, { profile: 'default' });
+}
+
+async function findGhAsset(repo, re) { // latest GitHub release file + its SHA-256 (read from the release page, no API quota)
+  const r = await fetch(`https://github.com/${repo}/releases/latest`, { signal: AbortSignal.timeout(30000) });
+  const tag = r.url.split('/tag/')[1];
+  const html = await getText(`https://github.com/${repo}/releases/expanded_assets/${tag}`);
+  for (const block of html.split(/<li\b/)) {
+    const h = [...block.matchAll(/href="([^"]+)"/g)].map(x => x[1]).find(u => re.test(u)), d = block.match(/sha256:([a-f0-9]{64})/);
+    if (h && d) return { url: 'https://github.com' + h, sha: d[1] };
+  }
+  throw new Error('Could not find the download for ' + repo);
+}
+async function installMpv(report) {
+  const dir = toolsDir(); fs.mkdirSync(dir, { recursive: true });
+  const fetchChecked = async (a, tmp, rep) => { await downloadTo(a.url, tmp, rep); if ((await sha256(tmp)) !== a.sha.toLowerCase()) { fs.rmSync(tmp, { force: true }); throw new Error('A download failed the safety check, so it was not installed'); } };
+  if (!fs.existsSync(toolPath('7zr'))) { const a = await findGhAsset('ip7z/7zip', /\/7zr\.exe$/), tmp = path.join(dir, '7zr.part'); await fetchChecked(a, tmp); fs.renameSync(tmp, path.join(dir, '7zr' + EXE)); }
+  const a = await findGhAsset('shinchiro/mpv-winbuild-cmake', /\/mpv-x86_64-\d{8}-git-[0-9a-f]+\.7z$/), tmp = path.join(dir, 'mpv.part');
+  await fetchChecked(a, tmp, report);
+  const work = path.join(dir, 'unpack-mpv'); fs.rmSync(work, { recursive: true, force: true }); fs.mkdirSync(work, { recursive: true });
+  await new Promise((res, rej) => execFile(toolPath('7zr'), ['x', tmp, '-o' + work, '-y', 'mpv.exe', 'd3dcompiler_43.dll'], { windowsHide: true, maxBuffer: 1 << 24 }, err => err ? rej(err) : res()));
+  const exe = findFile(work, 'mpv.exe'); if (!exe) throw new Error('The player file was missing from the download');
+  fs.copyFileSync(exe, path.join(dir, 'mpv' + EXE));
+  const dll = findFile(work, 'd3dcompiler_43.dll'); if (dll) fs.copyFileSync(dll, path.join(dir, 'd3dcompiler_43.dll'));
+  fs.rmSync(tmp, { force: true }); fs.rmSync(work, { recursive: true, force: true });
+}
+
 /* ---------- Sidebar ---------- */
 function showPanel(id) {
   if (openPanel && panels[openPanel]) win.contentView.removeChildView(panels[openPanel]);
@@ -945,6 +1210,7 @@ function showPanel(id) {
 }
 
 function togglePanel(id) {
+  if (id === 'livetv') { openLiveTv(); return; }
   if (openPanel === id) return showPanel(null);
   const it = side().find(s => s.id === id); if (!it) return;
   if (!panels[id]) {
@@ -985,7 +1251,7 @@ function removeSide(id) {
 function sideMenu(id) {
   const it = side().find(s => s.id === id); if (!it) return;
   Menu.buildFromTemplate([
-    { label: 'Open in new tab', click: () => newTab(it.url) },
+    { label: 'Open in new tab', click: () => (id === 'livetv' ? openLiveTv() : newTab(it.url)) },
     { label: 'Remove from sidebar', click: () => removeSide(id) }
   ]).popup({ window: win });
 }
@@ -1136,6 +1402,16 @@ ipcMain.on('cmd', (e, c, a) => {
     case 'google': addGmailFlow(tab()); break;
     case 'pfNew': addDialog('profile'); break;
     case 'checkUpdates': checkUpdates(true); break;
+    case 'ltStage': { const t = tabs.find(x => x.view.webContents.id === e.sender.id); if (t && a && isFinite(a.x + a.y + a.w + a.h)) { live.tabId = t.id; live.rect = { x: +a.x, y: +a.y, w: +a.w, h: +a.h }; placeLive(); } break; }
+    case 'ltCtl': {
+      const k = a && a.k;
+      if (k === 'pause') mpvSend(['cycle', 'pause']).catch(() => {});
+      else if (k === 'mute') mpvSend(['cycle', 'mute']).catch(() => {});
+      else if (k === 'vol') { const v = Math.max(0, Math.min(130, Math.round(+a.v) || 0)); liveCfg().volume = v; settings.save(); mpvSend(['set_property', 'volume', v]).catch(() => {}); }
+      else if (k === 'fs') liveFs(!live.fs);
+      else if (k === 'stop') { liveStop(false); livePush(); }
+      break;
+    }
     case 'ytShow': if (typeof a === 'string' && path.resolve(a).startsWith(path.resolve(app.getPath('downloads')))) shell.showItemInFolder(a); break;
     case 'ytClose': if (ytWin && !ytWin.isDestroyed() && e.sender === ytWin.webContents) ytWin.close(); break;
     case 'pfAdd': { const gm = pendingGmail, p = addProfile(a); BrowserWindow.fromWebContents(e.sender)?.close(); if (p) newTab(gm ? GOOGLE_LOGIN : NEWTAB, { profile: p.id }); break; }
@@ -1185,6 +1461,15 @@ ipcMain.handle('data', (e, what, a) => {
     case 'dlClear': { for (let i = downloads.length - 1; i >= 0; i--) if (downloads[i].state !== 'progressing') downloads.splice(i, 1); dlChanged(); return downloads.map(dlView); }
     case 'ytCancel': ytCancel(a); break;
     case 'ytUpdate': return ytUpdate();
+    case 'ltInit': { const t = tabs.find(x => x.view.webContents.id === e.sender.id); if (t) live.tabId = t.id; placeLive(); return { mpv: fs.existsSync(toolPath('mpv')), sources: liveCfg().sources.map(s => ({ id: s.id, name: s.name, type: s.type })), separate: !!liveCfg().separate, st: { ...live.st, fs: live.fs } }; }
+    case 'ltInstall': return (async () => { try { await installMpv((got, total) => sendLt({ type: 'lt-install', got, total })); return {}; } catch (err) { return { error: String(err.message || err) }; } })();
+    case 'ltAdd': return liveAdd(a && a.url, a && a.name).then(r => r, err => ({ error: String(err.message || err) }));
+    case 'ltRemove': { const L = liveCfg(); L.sources = L.sources.filter(x => x.id !== a); delete liveCache[a]; try { fs.rmSync(path.join(liveDir(), a + '.json'), { force: true }); } catch {} settings.save(); break; }
+    case 'ltRefresh': return liveLoad(liveCfg().sources.find(x => x.id === a) || {}, true).then(l => ({ count: l.length }), err => ({ error: String(err.message || err) }));
+    case 'ltChannels': return liveList(a && a.src, a || {}).catch(err => ({ error: String(err.message || err), total: 0, all: 0, groups: [], items: [] }));
+    case 'ltFav': { const k = a.src + '|' + a.k, F = liveCfg().favs, i = F.indexOf(k); if (i >= 0) F.splice(i, 1); else F.push(k); settings.save(); break; }
+    case 'ltPlay': return livePlay(a && a.src, a && a.k).then(() => ({}), err => { live.st.error = String(err.message || err); livePush(); return { error: live.st.error }; });
+    case 'ltMode': liveCfg().separate = !!a; settings.save(); liveStop(false); if (live.proc) { try { live.proc.kill(); } catch {} } placeLive(); break;
     case 'getYt': return !!settings.get().ytAds;
     case 'setYt': settings.get().ytAds = !!a; settings.save(); break;
     case 'getDark': return settings.get().darkSites !== false;

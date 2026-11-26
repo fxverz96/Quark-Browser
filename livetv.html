@@ -1,0 +1,175 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'"><title>Live TV</title><link rel="icon" href="icons/livetv.svg">
+<style>
+:root{--bg:#232a3b;--side:#1c2130;--card:#2a3246;--line:#3a4358;--txt:#e8ebf2;--dim:#9aa3b8;--hov:#323b52;--acc:#2dd4bf}
+@media (prefers-color-scheme:light){:root{--bg:#f5f7fb;--side:#e9edf5;--card:#ffffff;--line:#d5dbe7;--txt:#1d2330;--dim:#5d6678;--hov:#dfe5f0;--acc:#0d9488}}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--txt);font:13px "Segoe UI",system-ui,sans-serif;display:grid;grid-template-columns:340px 1fr}
+aside{background:var(--side);display:flex;flex-direction:column;min-height:0;padding:14px 12px 10px;gap:8px;border-right:1px solid var(--line)}
+.hd{display:flex;align-items:center;justify-content:space-between;padding:0 4px}
+.hd b{font-size:17px}
+button{font:inherit;color:var(--txt);background:var(--hov);border:0;border-radius:16px;padding:6px 12px;cursor:pointer}
+button:hover{filter:brightness(1.15)}
+button:disabled{opacity:.5}
+.go{background:var(--acc);color:#06201c;font-weight:600}
+input[type=text],select{width:100%;height:34px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--txt);padding:0 10px;font:inherit;outline:0}
+input[type=text]:focus,select:focus{border-color:var(--acc)}
+.srcrow{display:flex;gap:6px}
+.srcrow select{flex:1}
+.srcrow button{padding:0;width:34px;height:34px;border-radius:10px}
+#list{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:2px;margin:0 -4px}
+.row{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:10px;cursor:pointer}
+.row:hover{background:var(--hov)}
+.row.on{background:var(--card);box-shadow:inset 3px 0 0 var(--acc)}
+.lg{position:relative;width:34px;height:34px;border-radius:8px;background:var(--card);display:grid;place-items:center;font-weight:600;color:var(--dim);overflow:hidden;flex:none}
+.lg img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#fff}
+.nm{flex:1;min-width:0}
+.nm div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm small,small,.dim{color:var(--dim);font-size:12px}
+.star{background:none;padding:2px 6px;color:var(--dim);font-size:15px}
+.star.on{color:#facc15}
+.err{color:#f87171}
+.mode{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:12px;padding:2px 4px}
+#addbox{background:var(--card);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+#addbox ul{margin:0 0 0 16px;color:var(--dim);font-size:12px;line-height:1.6}
+.r2{display:flex;gap:8px}
+main{display:flex;flex-direction:column;min-width:0;min-height:0}
+#bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;height:52px}
+#np{min-width:0}
+#np b{display:block;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ctl{display:flex;align-items:center;gap:6px}
+#ctl button{width:34px;height:34px;padding:0;border-radius:50%;font-size:15px}
+#vol{width:90px;accent-color:var(--acc)}
+#stage{flex:1;min-height:0;background:#000;position:relative;display:grid;place-items:center}
+#hint{color:#9aa3b8;text-align:center;max-width:420px;line-height:1.6;padding:20px}
+.need h3{color:#e8ebf2;margin-bottom:8px}
+.bar{height:8px;border-radius:4px;background:#2a3246;overflow:hidden;margin:12px 0 4px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#8b5cf6,#f472b6)}
+</style></head>
+<body>
+<aside>
+  <div class="hd"><b>Live TV</b><button id="add">+ Add source</button></div>
+  <div id="addbox" hidden>
+    <b>Add a source</b>
+    <ul><li>An M3U / M3U8 playlist link</li><li>A Stremio add-on link (ends with manifest.json)</li><li>A single stream link</li></ul>
+    <input type="text" id="url" placeholder="https://…" spellcheck="false" autocomplete="off">
+    <input type="text" id="nm" placeholder="Name (optional)" autocomplete="off">
+    <div class="r2"><button class="go" id="addgo">Add</button><button id="addx">Cancel</button></div>
+    <small>Add only sources you have the right to watch.</small>
+    <small id="addmsg"></small>
+  </div>
+  <div class="srcrow"><select id="src"></select><button id="ref" title="Refresh this list">↻</button><button id="del" title="Remove this source">✕</button></div>
+  <input type="text" id="q" placeholder="Search channels…" autocomplete="off" spellcheck="false">
+  <select id="grp"></select>
+  <div id="list"></div>
+  <label class="mode"><input type="checkbox" id="sep"> Open in a separate player window</label>
+</aside>
+<main>
+  <div id="bar"><div id="np"><b id="name">Pick a channel</b><small id="status"></small></div>
+    <div id="ctl"><button id="pp" title="Pause / play">⏸</button><button id="mu" title="Mute">🔊</button><input type="range" id="vol" min="0" max="130" value="100" title="Volume"><button id="fs" title="Full screen">⛶</button><button id="stop" title="Stop">■</button></div></div>
+  <div id="stage"><div id="hint"></div></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let src = '', st = {}, mpvOk = false, items = [], total = 0, playingK = '', tm = 0;
+const lsGet = k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+
+function sendRect() { const r = $('stage').getBoundingClientRect(); hub.cmd('ltStage', { x: r.left, y: r.top, w: r.width, h: r.height }); }
+new ResizeObserver(sendRect).observe($('stage')); addEventListener('resize', sendRect); setInterval(sendRect, 1500);
+
+function applyState(s) {
+  st = s;
+  $('name').textContent = s.name || 'Pick a channel';
+  $('status').textContent = s.error ? s.error : s.buffering ? 'Buffering…' : s.playing ? (s.paused ? 'Paused' : 'Playing') : (s.name ? 'Starting…' : '');
+  $('status').className = s.error ? 'err' : '';
+  $('pp').textContent = s.paused ? '▶' : '⏸'; $('mu').textContent = s.mute ? '🔇' : '🔊'; $('vol').value = s.volume || 100;
+}
+hub.onMsg(m => {
+  if (m.type === 'lt') applyState(m.st);
+  else if (m.type === 'lt-install' && $('ip')) { const p = m.total ? Math.round(m.got / m.total * 100) : 0; $('ip').innerHTML = `<div class="bar"><i style="width:${p}%"></i></div><small>${(m.got / 1e6).toFixed(1)} of ${(m.total / 1e6).toFixed(1)} MB</small>`; }
+});
+
+function fillSources(list, keep) {
+  $('src').innerHTML = list.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  if (keep && list.some(s => s.id === keep)) src = keep; else src = (list[0] || {}).id || '';
+  $('src').value = src; $('ref').disabled = $('del').disabled = !src;
+}
+function setGroups(groups, cur) {
+  $('grp').innerHTML = '<option value="">All groups</option><option value="★">★ Favorites</option>' + groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('');
+  $('grp').value = [...$('grp').options].some(o => o.value === cur) ? cur : '';
+}
+function rows() {
+  const L = $('list');
+  if (!src) { L.innerHTML = '<p class="dim" style="padding:10px 8px">No sources yet. Click “+ Add source” and paste a playlist or add-on link.</p>'; return; }
+  L.innerHTML = items.length ? items.map(c => `<div class="row${c.k === playingK ? ' on' : ''}" data-k="${esc(c.k)}"><div class="lg"><span>${esc((c.n || '?')[0].toUpperCase())}</span>${c.l ? `<img src="${esc(c.l)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div><div class="nm"><div>${esc(c.n)}</div><small>${esc(c.g || '')}</small></div><button class="star${c.f ? ' on' : ''}" data-f="${esc(c.k)}" title="Favorite">${c.f ? '★' : '☆'}</button></div>`).join('')
+    + (items.length < total ? `<button id="more" style="margin:8px auto">Show more (${items.length} of ${total})</button>` : '')
+    : '<p class="dim" style="padding:10px 8px">No channels found.</p>';
+}
+async function loadList(more) {
+  if (!src) { items = []; total = 0; rows(); return; }
+  const g = $('grp').value;
+  const r = await hub.data('ltChannels', { src, q: $('q').value, group: g === '★' ? '' : g, fav: g === '★', offset: more ? items.length : 0 });
+  if (r.error) { $('list').innerHTML = `<p class="err" style="padding:10px 8px">${esc(r.error)}</p>`; return; }
+  if (!more) { items = []; setGroups(r.groups, g); }
+  items = items.concat(r.items); total = r.total; rows();
+}
+function needMpv() {
+  $('hint').style.display = '';
+  $('hint').innerHTML = `<div class="need"><h3>Install the player</h3><p>Live TV uses <b>mpv</b>, a fast open-source player. It is downloaded once (about 35 MB) from its official build page and checked for safety.</p><div id="ip"></div><button class="go" id="inst">Install player</button></div>`;
+  $('inst').onclick = async () => {
+    $('inst').disabled = true;
+    const r = await hub.data('ltInstall');
+    if (r && r.error) { $('ip').innerHTML = `<p class="err">${esc(r.error)}</p>`; $('inst').disabled = false; return; }
+    mpvOk = true; $('hint').innerHTML = 'Player installed. Pick a channel to start.';
+  };
+}
+async function play(k) {
+  if (!mpvOk) return needMpv();
+  playingK = k; rows(); $('hint').style.display = 'none';
+  const r = await hub.data('ltPlay', { src, k });
+  if (r && r.error) applyState({ ...st, error: r.error, buffering: false, playing: false });
+}
+function showAdd(on) { $('addbox').hidden = !on; if (on) { $('url').value = ''; $('nm').value = ''; $('addmsg').textContent = ''; $('url').focus(); } }
+
+$('add').onclick = () => showAdd($('addbox').hidden);
+$('addx').onclick = () => showAdd(false);
+$('addgo').onclick = async () => {
+  $('addmsg').className = 'dim'; $('addmsg').textContent = 'Reading the link…'; $('addgo').disabled = true;
+  const r = await hub.data('ltAdd', { url: $('url').value, name: $('nm').value });
+  $('addgo').disabled = false;
+  if (r.error) { $('addmsg').className = 'err'; $('addmsg').textContent = r.error; return; }
+  const i = await hub.data('ltInit'); fillSources(i.sources, r.id); lsSet('src', src); showAdd(false); $('q').value = ''; await loadList();
+};
+$('src').onchange = () => { src = $('src').value; lsSet('src', src); $('q').value = ''; $('grp').value = ''; loadList(); };
+$('ref').onclick = async () => { $('ref').disabled = true; await hub.data('ltRefresh', src); $('ref').disabled = false; loadList(); };
+$('del').onclick = async () => {
+  if (!src || !confirm('Remove this source?')) return;
+  await hub.data('ltRemove', src);
+  const i = await hub.data('ltInit'); fillSources(i.sources); lsSet('src', src); loadList();
+};
+$('q').oninput = () => { clearTimeout(tm); tm = setTimeout(loadList, 250); };
+$('grp').onchange = () => loadList();
+$('list').addEventListener('click', async e => {
+  if (e.target.id === 'more') return loadList(true);
+  const f = e.target.closest('[data-f]');
+  if (f) { e.stopPropagation(); await hub.data('ltFav', { src, k: f.dataset.f }); const c = items.find(x => x.k === f.dataset.f); if (c) c.f = !c.f; if ($('grp').value === '★') return loadList(); return rows(); }
+  const r = e.target.closest('.row'); if (r) play(r.dataset.k);
+});
+$('pp').onclick = () => hub.cmd('ltCtl', { k: 'pause' });
+$('mu').onclick = () => hub.cmd('ltCtl', { k: 'mute' });
+$('vol').oninput = () => hub.cmd('ltCtl', { k: 'vol', v: +$('vol').value });
+$('fs').onclick = () => hub.cmd('ltCtl', { k: 'fs' });
+$('stop').onclick = () => { playingK = ''; rows(); hub.cmd('ltCtl', { k: 'stop' }); };
+$('sep').onchange = () => hub.data('ltMode', $('sep').checked);
+
+(async () => {
+  const i = await hub.data('ltInit');
+  mpvOk = i.mpv; $('sep').checked = i.separate; fillSources(i.sources, lsGet('src')); applyState(i.st);
+  $('hint').textContent = i.sources.length ? 'Pick a channel from the list.' : 'Add a source to start watching.';
+  if (!i.sources.length) showAdd(true);
+  await loadList(); sendRect();
+})();
+</script></body></html>
